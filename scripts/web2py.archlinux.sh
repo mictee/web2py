@@ -10,7 +10,7 @@ chmod +x $prog
 function web2py_start {
   nohup ./$prog -a "<recycle>" 2>/dev/null &
   pid=`pgrep $prog | tail -1`
-  if [ $pid -ne $$ ]
+  if [ "x$pid" -ne "x$$" ]
   then
     echo "WEB2PY has been started."
   fi
@@ -18,7 +18,7 @@ function web2py_start {
 function web2py_stop {
   kill -15 `pgrep $prog | grep -v $$` 2>/dev/null
   pid=`pgrep $prog | head -1`
-  if [ $pid -ne $$ ]
+  if [ "x$pid" -ne "x$$" ]
   then
     echo "WEB2PY has been stopped."
   fi
