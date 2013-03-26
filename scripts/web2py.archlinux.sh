@@ -11,20 +11,30 @@ function web2py_start {
   pid=`pgrep -f $prog | tail -1`
   if [ "x$pid" != "x$$" ]
   then
-    echo "WEB2PY has been started."
+      echo "WEB2PY has been started (pid $pid). Stop it with '$0 stop'"
   else
     echo "Failed to start WEB2PY."
   fi
 }
 
 function web2py_stop {
-  kill -15 `pgrep -f $prog | grep -v $$` 2>&1 >>/dev/null
-  pid=`pgrep $prog | head -1`
-  if [ "x$pid" -ne "x$$" ]
-  then
-    echo "WEB2PY has been stopped."
+  pid="`pgrep -f $prog | grep -v $$`"
+  if [ "x$pid" == "x" ]
+    then
+    echo "No WEB2PY processes to stop."
   else
-    echo "Failed to start WEB2PY."
+    kill -15 $pid
+    # Wait for web2py to shut down gracefully.
+    sleep 2
+    pid="`pgrep -f $prog | head -1`"
+    if [ "x$pid" == "x" ]
+    then
+      echo "WEB2PY has been stopped."
+    else
+      echo "Failed to stop WEB2PY. (Possibly, only one of several web2py processes was killed.)"
+      echo "Still running:"
+      pgrep -af $prog
+    fi
   fi
 }
 
