@@ -2,15 +2,14 @@
 # the script should be run
 # from WEB2PY root directory
 
-prog=`basename $0`
+prog="web2py.py"
 
-cd `pwd`
 chmod +x $prog
 
 function web2py_start {
-  nohup ./$prog -a "<recycle>" 2>/dev/null &
-  pid=`pgrep $prog | tail -1`
-  if [[ $pid -ne $$ ]]
+  nohup python2 ./$prog -a "<recycle>" 2>&1 >>/dev/null &
+  pid=`pgrep -f $prog | tail -1`
+  if [ "x$pid" != "x$$" ]
   then
     echo "WEB2PY has been started."
   else
@@ -19,9 +18,9 @@ function web2py_start {
 }
 
 function web2py_stop {
-  kill -15 `pgrep $prog | grep -v $$` 2>/dev/null
+  kill -15 `pgrep -f $prog | grep -v $$` 2>&1 >>/dev/null
   pid=`pgrep $prog | head -1`
-  if [[ $pid -ne $$ ]]
+  if [ "x$pid" -ne "x$$" ]
   then
     echo "WEB2PY has been stopped."
   else
@@ -41,7 +40,7 @@ case "$1" in
     web2py_start
   ;;
   *)
-    echo "Usage: $prog [start|stop|restart]"
+    echo "Usage: $0 [start|stop|restart]"
   ;;
 esac
 
