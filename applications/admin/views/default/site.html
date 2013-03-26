@@ -144,14 +144,6 @@
 	<p>{{=button(URL('wizard','index'), T('Start wizard'))}}<br/>
 	  {{=T("(requires internet access, experimental)")}}</p>
       </div> <!-- /APP WIZARD -->
-      {{if TWITTER_HASH:}}
-      <!-- TWITTER -->
-      <div class="box">
-	<h4>{{=T("%s Recent Tweets"%TWITTER_HASH)}}</h4>
-	<div id="tweets">{{=T('loading...')}}</div>
-	<script>jQuery(document).ready(function(){jQuery('#tweets').load('{{=URL('twitter.load')}}');});</script>
-      </div> <!-- /TWITTER -->
-      {{pass}}
     </div>
   </div> <!-- /sidebar -->
 </div> <!-- /row-fluid
