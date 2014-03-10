@@ -15,7 +15,6 @@ import re
 import sys
 import pkgutil
 import logging
-import marshal
 from cgi import escape
 from threading import RLock
 
@@ -24,14 +23,14 @@ try:
 except ImportError:
     import copy_reg # python 2
 
-from portalocker import read_locked, LockedFile
+from gluon.portalocker import read_locked, LockedFile
 from utf8 import Utf8
 
-from fileutils import listdir
-import settings
-from cfs import getcfs
-from html import XML, xmlescape
-from contrib.markmin.markmin2html import render, markmin_escape
+from gluon.fileutils import listdir
+import gluon.settings as settings
+from gluon.cfs import getcfs
+from gluon.html import XML, xmlescape
+from gluon.contrib.markmin.markmin2html import render, markmin_escape
 from string import maketrans
 
 __all__ = ['translator', 'findT', 'update_all_languages']
@@ -68,8 +67,8 @@ regex_param = re.compile(r'{(?P<s>.+?)}')
 
 # pattern for a valid accept_language
 regex_language = \
-    re.compile('([a-z]{2}(?:\-[a-z]{2})?(?:\-[a-z]{2})?)(?:[,;]|$)')
-regex_langfile = re.compile('^[a-z]{2}(-[a-z]{2})?\.py$')
+    re.compile('([a-z]{2,3}(?:\-[a-z]{2})?(?:\-[a-z]{2})?)(?:[,;]|$)')
+regex_langfile = re.compile('^[a-z]{2,3}(-[a-z]{2})?\.py$')
 regex_backslash = re.compile(r"\\([\\{}%])")
 regex_plural = re.compile('%({.+?})')
 regex_plural_dict = re.compile('^{(?P<w>[^()[\]][^()[\]]*?)\((?P<n>[^()\[\]]+)\)}$')  # %%{word(varname or number)}
@@ -179,7 +178,7 @@ def read_possible_plural_rules():
     """
     plurals = {}
     try:
-        import contrib.plural_rules as package
+        import gluon.contrib.plural_rules as package
         for importer, modname, ispkg in pkgutil.iter_modules(package.__path__):
             if len(modname) == 2:
                 module = __import__(package.__name__ + '.' + modname,
@@ -238,7 +237,7 @@ def read_possible_languages_aux(langdir):
 
     plurals = {}
     flist = oslistdir(langdir) if isdir(langdir) else []
-        
+
     # scan languages directory for plural dict files:
     for pname in flist:
         if regex_plural_file.match(pname):
@@ -297,8 +296,7 @@ def write_plural_dict(filename, contents):
         return
     try:
         fp = LockedFile(filename, 'w')
-        fp.write('#!/usr/bin/env python\n{\n# "singular form (0)": ["first plural form (1)", "second plural form (2)", ...],\n')
-        # coding: utf8\n{\n')
+        fp.write('#!/usr/bin/env python\n# -*- coding: utf-8 -*-\n{\n# "singular form (0)": ["first plural form (1)", "second plural form (2)", ...],\n')
         for key in sorted(contents, lambda x, y: cmp(unicode(x, 'utf-8').lower(), unicode(y, 'utf-8').lower())):
             forms = '[' + ','.join([repr(Utf8(form))
                                    for form in contents[key]]) + ']'
@@ -321,7 +319,7 @@ def write_dict(filename, contents):
         if not settings.global_settings.web2py_runtime_gae:
             logging.warning('Unable to write to file %s' % filename)
         return
-    fp.write('# coding: utf8\n{\n')
+    fp.write('# -*- coding: utf-8 -*-\n{\n')
     for key in sorted(contents, lambda x, y: cmp(unicode(x, 'utf-8').lower(), unicode(y, 'utf-8').lower())):
         fp.write('%s: %s,\n' % (repr(Utf8(key)), repr(Utf8(contents[key]))))
     fp.write('}\n')
@@ -423,6 +421,10 @@ class lazyT(object):
             return lazyT(self)
         return lazyT(self.m, symbols, self.T, self.f, self.t, self.M)
 
+def pickle_lazyT(c):
+    return str, (c.xml(),)
+
+copy_reg.pickle(lazyT, pickle_lazyT)
 
 class translator(object):
     """
@@ -471,6 +473,8 @@ class translator(object):
         self.otherTs = {}
         self.filter = markmin
         self.ftag = 'markmin'
+        
+        self.ns = None
 
     def get_possible_languages_info(self, lang=None):
         """
@@ -654,7 +658,12 @@ class translator(object):
                     set_plural(language)
                     self.accepted_language = language
                     return languages
-        self.accepted_language = language or self.current_languages[0]
+        self.accepted_language = language
+        if not language:
+            if self.current_languages:
+                self.accepted_language = self.current_languages[0]
+            else:
+                self.accepted_language = DEFAULT_LANGUAGE
         self.language_file = self.default_language_file
         self.cache = global_language_cache.setdefault(self.language_file,
                                                       ({}, RLock()))
@@ -662,26 +671,46 @@ class translator(object):
         set_plural(self.accepted_language)
         return languages
 
-    def __call__(self, message, symbols={}, language=None, lazy=None):
+    def __call__(self, message, symbols={}, language=None, lazy=None, ns=None):
         """
         get cached translated plain text message with inserted parameters(symbols)
         if lazy==True lazyT object is returned
         """
         if lazy is None:
             lazy = self.lazy
-        if not language:
+        if not language and not ns:
             if lazy:
                 return lazyT(message, symbols, self)
             else:
                 return self.translate(message, symbols)
         else:
-            try:
-                otherT = self.otherTs[language]
-            except KeyError:
-                otherT = self.otherTs[language] = translator(
-                    self.langpath, self.http_accept_language)
-                otherT.force(language)
+            if ns:
+                if ns != self.ns:
+                    self.langpath = os.path.join(self.langpath, ns)
+                if self.ns is None:
+                    self.ns = ns
+            otherT = self.__get_otherT__(language, ns)
             return otherT(message, symbols, lazy=lazy)
+        
+    def __get_otherT__(self, language=None, namespace=None):
+        if not language and not namespace:
+            raise Exception('Incorrect parameters')
+        
+        if namespace:
+            if language:
+                index = '%s/%s' % (namespace, language)
+            else:
+                index = namespace
+        else:
+            index = language
+        try:
+            otherT = self.otherTs[index]
+        except KeyError:
+            otherT = self.otherTs[index] = translator(self.langpath, \
+                                                      self.http_accept_language)
+            if language:
+                otherT.force(language)
+        return otherT
 
     def apply_filter(self, message, symbols={}, filter=None, ftag=None):
         def get_tr(message, prefix, filter):
@@ -711,24 +740,22 @@ class translator(object):
         return XML(message.translate(ttab_out))
 
     def M(self, message, symbols={}, language=None,
-          lazy=None, filter=None, ftag=None):
+          lazy=None, filter=None, ftag=None, ns=None):
         """
         get cached translated markmin-message with inserted parametes
         if lazy==True lazyT object is returned
         """
         if lazy is None:
             lazy = self.lazy
-        if not language:
+        if not language and not ns:
             if lazy:
                 return lazyT(message, symbols, self, filter, ftag, True)
             else:
                 return self.apply_filter(message, symbols, filter, ftag)
         else:
-            try:
-                otherT = self.otherTs[language]
-            except KeyError:
-                otherT = self.otherTs[language] = translator(self.request)
-                otherT.force(language)
+            if ns:
+                self.langpath = os.path.join(self.langpath, ns)
+            otherT = self.__get_otherT__(language, ns)
             return otherT.M(message, symbols, lazy=lazy)
 
     def get_t(self, message, prefix=''):
@@ -925,18 +952,6 @@ def findT(path, language=DEFAULT_LANGUAGE):
             DEFAULT_LANGUAGE_NAME if language in ('default', DEFAULT_LANGUAGE)
             else sentences['!langcode!'])
     write_dict(lang_file, sentences)
-
-### important to allow safe session.flash=T(....)
-
-
-def lazyT_unpickle(data):
-    return marshal.loads(data)
-
-
-def lazyT_pickle(data):
-    return lazyT_unpickle, (marshal.dumps(str(data)),)
-copy_reg.pickle(lazyT, lazyT_pickle, lazyT_unpickle)
-
 
 def update_all_languages(application_path):
     path = pjoin(application_path, 'languages/')

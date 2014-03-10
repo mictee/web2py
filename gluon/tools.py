@@ -22,6 +22,8 @@ import urllib
 import urllib2
 import Cookie
 import cStringIO
+import ConfigParser
+import email.utils
 from email import MIMEBase, MIMEMultipart, MIMEText, Encoders, Header, message_from_string, Charset
 
 from gluon.contenttype import contenttype
@@ -45,7 +47,7 @@ except ImportError:
         import simplejson as json_parser
     except:
         # fallback to pure-Python module
-        import contrib.simplejson as json_parser
+        import gluon.contrib.simplejson as json_parser
 
 __all__ = ['Mail', 'Auth', 'Recaptcha', 'Crud', 'Service', 'Wiki',
            'PluginManager', 'fetch', 'geocode', 'prettydate']
@@ -248,6 +250,7 @@ class Mail(object):
         settings.sender = sender
         settings.login = login
         settings.tls = tls
+        settings.hostname = None
         settings.ssl = False
         settings.cipher_type = None
         settings.gpg_home = None
@@ -266,8 +269,8 @@ class Mail(object):
     def send(
         self,
         to,
-        subject='None',
-        message='None',
+        subject = '[no subject]',
+        message = '[no message]',
         attachments=None,
         cc=None,
         bcc=None,
@@ -275,7 +278,8 @@ class Mail(object):
         sender=None,
         encoding='utf-8',
         raw=False,
-        headers={}
+        headers={},
+        from_address=None
     ):
         """
         Sends an email using data specified in constructor
@@ -305,8 +309,9 @@ class Mail(object):
             encoding: encoding of all strings passed to this method (including
                       message bodies)
             headers: dictionary of headers to refine the headers just before
-                     sending mail, e.g. {'Return-Path' : 'bounces@example.org'}
-
+                     sending mail, e.g. {'X-Mailer' : 'web2py mailer'}
+            from_address: address to appear in the 'From:' header, this is not the
+                          envelope sender. If not specified the sender will be used
         Examples:
 
             #Send plain text message to single address:
@@ -347,10 +352,10 @@ class Mail(object):
                      mail.send_mail() method
         self.error: Exception message or None if above was successful
         """
-        
+
         # We don't want to use base64 encoding for unicode mail
         Charset.add_charset('utf-8', Charset.QP, Charset.QP, 'utf-8')
-        
+
         def encode_header(key):
             if [c for c in key if 32 > ord(c) or ord(c) > 127]:
                 return Header.Header(key.encode('utf-8'), 'utf-8')
@@ -370,14 +375,19 @@ class Mail(object):
         if not isinstance(sender, str):
             raise Exception('Sender address not specified')
 
-        if not raw:
+        if not raw and attachments:
+            # Use multipart/mixed if there is attachments
             payload_in = MIMEMultipart.MIMEMultipart('mixed')
-        else:
+        elif raw:
             # no encoding configuration for raw messages
-            if isinstance(message, basestring):
+            if not isinstance(message, basestring):
+                message = message.read()
+            if isinstance(message, unicode):
+                text = message.encode('utf-8')
+            elif not encoding == 'utf-8':
                 text = message.decode(encoding).encode('utf-8')
             else:
-                text = message.read().decode(encoding).encode('utf-8')
+                text = message
             # No charset passed to avoid transport encoding
             # NOTE: some unicode encoded strings will produce
             # unreadable mail contents.
@@ -397,7 +407,8 @@ class Mail(object):
             text = html = None
         elif isinstance(message, (list, tuple)):
             text, html = message
-        elif message.strip().startswith('<html') and message.strip().endswith('</html>'):
+        elif message.strip().startswith('<html') and \
+                message.strip().endswith('</html>'):
             text = self.settings.server == 'gae' and message or None
             html = message
         else:
@@ -405,21 +416,43 @@ class Mail(object):
             html = None
 
         if (not text is None or not html is None) and (not raw):
-            attachment = MIMEMultipart.MIMEMultipart('alternative')
+
             if not text is None:
-                if isinstance(text, basestring):
+                if not isinstance(text, basestring):
+                    text = text.read()
+                if isinstance(text, unicode):
+                    text = text.encode('utf-8')
+                elif not encoding == 'utf-8':
                     text = text.decode(encoding).encode('utf-8')
-                else:
-                    text = text.read().decode(encoding).encode('utf-8')
-                attachment.attach(MIMEText.MIMEText(text, _charset='utf-8'))
             if not html is None:
-                if isinstance(html, basestring):
+                if not isinstance(html, basestring):
+                    html = html.read()
+                if isinstance(html, unicode):
+                    html = html.encode('utf-8')
+                elif not encoding == 'utf-8':
                     html = html.decode(encoding).encode('utf-8')
-                else:
-                    html = html.read().decode(encoding).encode('utf-8')
+
+            # Construct mime part only if needed
+            if text is not None and html:
+                # We have text and html we need multipart/alternative
+                attachment = MIMEMultipart.MIMEMultipart('alternative')
+                attachment.attach(MIMEText.MIMEText(text, _charset='utf-8'))
                 attachment.attach(
                     MIMEText.MIMEText(html, 'html', _charset='utf-8'))
-            payload_in.attach(attachment)
+            elif text is not None:
+                attachment = MIMEText.MIMEText(text, _charset='utf-8')
+            elif html:
+                attachment = \
+                    MIMEText.MIMEText(html, 'html', _charset='utf-8')
+
+            if attachments:
+                # If there is attachments put text and html into
+                # multipart/mixed
+                payload_in.attach(attachment)
+            else:
+                # No attachments no multipart/mixed
+                payload_in = attachment
+
         if (attachments is None) or raw:
             pass
         elif isinstance(attachments, (list, tuple)):
@@ -624,7 +657,10 @@ class Mail(object):
             # no cryptography process as usual
             payload = payload_in
 
-        payload['From'] = encoded_or_raw(sender.decode(encoding))
+        if from_address:
+            payload['From'] = encoded_or_raw(from_address.decode(encoding))
+        else:
+            payload['From'] = encoded_or_raw(sender.decode(encoding))
         origTo = to[:]
         if to:
             payload['To'] = encoded_or_raw(', '.join(to).decode(encoding))
@@ -636,8 +672,7 @@ class Mail(object):
         if bcc:
             to.extend(bcc)
         payload['Subject'] = encoded_or_raw(subject.decode(encoding))
-        payload['Date'] = time.strftime("%a, %d %b %Y %H:%M:%S +0000",
-                                        time.gmtime())
+        payload['Date'] = email.utils.formatdate()
         for k, v in headers.iteritems():
             payload[k] = encoded_or_raw(v.decode(encoding))
         result = {}
@@ -677,9 +712,9 @@ class Mail(object):
                 else:
                     server = smtplib.SMTP(*smtp_args)
                 if self.settings.tls and not self.settings.ssl:
-                    server.ehlo()
+                    server.ehlo(self.settings.hostname)
                     server.starttls()
-                    server.ehlo()
+                    server.ehlo(self.settings.hostname)
                 if self.settings.login:
                     server.login(*self.settings.login.split(':', 1))
                 result = server.sendmail(
@@ -721,7 +756,9 @@ class Recaptcha(DIV):
         error=None,
         error_message='invalid',
         label='Verify:',
-        options=''
+        options='',
+        comment = '',
+        ajax=False
     ):
         self.request_vars = request and request.vars or current.request.vars
         self.remote_addr = request.env.remote_addr
@@ -735,7 +772,8 @@ class Recaptcha(DIV):
         self.attributes = {}
         self.label = label
         self.options = options
-        self.comment = ''
+        self.comment = comment
+        self.ajax = ajax
 
     def _validate(self):
 
@@ -789,18 +827,43 @@ class Recaptcha(DIV):
             server = self.API_SSL_SERVER
         else:
             server = self.API_SERVER
-        captcha = DIV(
-            SCRIPT("var RecaptchaOptions = {%s};" % self.options),
-            SCRIPT(_type="text/javascript",
-                   _src="%s/challenge?k=%s%s" % (server, public_key, error_param)),
-            TAG.noscript(
-                IFRAME(
-                    _src="%s/noscript?k=%s%s" % (
-                        server, public_key, error_param),
-                    _height="300", _width="500", _frameborder="0"), BR(),
-                INPUT(
-                    _type='hidden', _name='recaptcha_response_field',
-                    _value='manual_challenge')), _id='recaptcha')
+        if not self.ajax:
+            captcha = DIV(
+                SCRIPT("var RecaptchaOptions = {%s};" % self.options),
+                SCRIPT(_type="text/javascript",
+                       _src="%s/challenge?k=%s%s" % (server, public_key, error_param)),
+                TAG.noscript(
+                    IFRAME(
+                        _src="%s/noscript?k=%s%s" % (
+                            server, public_key, error_param),
+                        _height="300", _width="500", _frameborder="0"), BR(),
+                    INPUT(
+                        _type='hidden', _name='recaptcha_response_field',
+                        _value='manual_challenge')), _id='recaptcha')
+
+        else: #use Google's ajax interface, needed for LOADed components
+
+            url_recaptcha_js = "%s/js/recaptcha_ajax.js" % server
+            RecaptchaOptions = "var RecaptchaOptions = {%s}" % self.options
+            script = """%(options)s;
+            jQuery.getScript('%(url)s',function() {
+                Recaptcha.create('%(public_key)s',
+                    'recaptcha',jQuery.extend(RecaptchaOptions,{'callback':Recaptcha.focus_response_field}))
+                }) """ % ({'options':RecaptchaOptions,'url':url_recaptcha_js,'public_key':public_key})
+            captcha = DIV(
+                SCRIPT(
+                    script,
+                    _type="text/javascript",
+                ),
+                TAG.noscript(
+                    IFRAME(
+                        _src="%s/noscript?k=%s%s" % (
+                            server, public_key, error_param),
+                        _height="300", _width="500", _frameborder="0"), BR(),
+                    INPUT(
+                        _type='hidden', _name='recaptcha_response_field',
+                        _value='manual_challenge')), _id='recaptcha')
+
         if not self.errors.captcha:
             return XML(captcha).xml()
         else:
@@ -849,8 +912,11 @@ class Auth(object):
         alternate_requires_registration=False,
         create_user_groups="user_%(id)s",
         everybody_group_id=None,
+        manager_actions={},
+        auth_manager_role=None,
         login_captcha=None,
         register_captcha=None,
+        pre_registration_div=None,
         retrieve_username_captcha=None,
         retrieve_password_captcha=None,
         captcha=None,
@@ -862,6 +928,8 @@ class Auth(object):
         on_failed_authentication=lambda x: redirect(x),
         formstyle="table3cols",
         label_separator=": ",
+        logging_enabled = True,
+        allow_delete_accounts=False,
         password_field='password',
         table_user_name='auth_user',
         table_group_name='auth_group',
@@ -879,6 +947,7 @@ class Auth(object):
         use_username=False,
         login_email_validate=True,
         login_userfield=None,
+        multi_login=False,
         logout_onlogout=None,
         register_fields=None,
         register_verify_password=True,
@@ -887,6 +956,12 @@ class Auth(object):
         username_case_sensitive=True,
         update_fields = ['email'],
         ondelete="CASCADE",
+        client_side = True,
+        renew_session_onlogin=True,
+        renew_session_onlogout=True,
+        keep_session_onlogin=True,
+        keep_session_onlogout=False,
+        wiki = Settings(),
     )
         # ## these are messages that can be customized
     default_messages = dict(
@@ -894,7 +969,7 @@ class Auth(object):
         register_button='Register',
         password_reset_button='Request reset password',
         password_change_button='Change password',
-        profile_save_button='Save profile',
+        profile_save_button='Apply changes',
         submit_button='Submit',
         verify_password='Verify Password',
         delete_label='Check to delete',
@@ -902,6 +977,9 @@ class Auth(object):
         access_denied='Insufficient privileges',
         registration_verifying='Registration needs verification',
         registration_pending='Registration is pending approval',
+        email_taken='This email already has an account',
+        invalid_username='Invalid username',
+        username_taken='Username already taken',
         login_disabled='Login disabled by administrator',
         logged_in='Logged in',
         email_sent='Email sent',
@@ -916,7 +994,7 @@ class Auth(object):
         invalid_password='Invalid password',
         is_empty="Cannot be empty",
         mismatched_password="Password fields don't match",
-        verify_email='Click on the link %(link)s to verify your email',
+        verify_email='Welcome %(username)s! Click on the link %(link)s to verify your email',
         verify_email_subject='Email verification',
         username_sent='Your username was emailed to you',
         new_password_sent='A new password was emailed to you',
@@ -988,7 +1066,7 @@ class Auth(object):
 
     Authentication Example:
 
-        from contrib.utils import *
+        from gluon.contrib.utils import *
         mail=Mail()
         mail.settings.server='smtp.gmail.com:587'
         mail.settings.sender='you@somewhere.com'
@@ -1079,11 +1157,12 @@ class Auth(object):
                    f=f, args=args, vars=vars, scheme=scheme)
 
     def here(self):
-        return URL(args=current.request.args, vars=current.request.vars)
+        return URL(args=current.request.args,vars=current.request.get_vars)
 
     def __init__(self, environment=None, db=None, mailer=True,
                  hmac_key=None, controller='default', function='user',
-                 cas_provider=None, signature=True, secure=False):
+                 cas_provider=None, signature=True, secure=False,
+                 csrf_prevention=True, propagate_extension=None):
         """
         auth=Auth(db)
 
@@ -1099,29 +1178,39 @@ class Auth(object):
             db = environment
         self.db = db
         self.environment = current
+        self.csrf_prevention = csrf_prevention
         request = current.request
         session = current.session
         auth = session.auth
         self.user_groups = auth and auth.user_groups or {}
         if secure:
             request.requires_https()
-        if auth and auth.last_visit and auth.last_visit + \
-                datetime.timedelta(days=0, seconds=auth.expiration) > request.now:
-            self.user = auth.user
-            # this is a trick to speed up sessions
-            if (request.now - auth.last_visit).seconds > (auth.expiration / 10):
-                auth.last_visit = request.now
+        now = request.now        
+        # if we have auth info
+        #    if not expired it, used it
+        #    if expired, clear the session
+        # else, only clear auth info in the session
+        if auth:
+            delta = datetime.timedelta(days=0, seconds=auth.expiration)
+            if auth.last_visit and auth.last_visit + delta > now:
+                self.user = auth.user
+                # this is a trick to speed up sessions to avoid many writes
+                if (now - auth.last_visit).seconds > (auth.expiration / 10):
+                    auth.last_visit = request.now
+            else:
+                self.user = None
+                if session.auth:
+                    del session.auth
+                session.renew(clear_session=True)                
         else:
             self.user = None
             if session.auth:
-                del session.auth
+                del session.auth            
         # ## what happens after login?
 
-        self.next = current.request.vars._next
-        if isinstance(self.next, (list, tuple)):
-            self.next = self.next[0]
         url_index = URL(controller, 'index')
-        url_login = URL(controller, function, args='login')
+        url_login = URL(controller, function, args='login',
+                        extension = propagate_extension)
         # ## what happens after registration?
 
         settings = self.settings = Settings()
@@ -1177,18 +1266,31 @@ class Auth(object):
         # ## these are messages that can be customized
         messages = self.messages = Messages(current.T)
         messages.update(Auth.default_messages)
+        messages.update(ajax_failed_authentication=DIV(H4('NOT AUTHORIZED'),
+            'Please ',
+            A('login',
+              _href=self.settings.login_url +
+              ('?_next=' + urllib.quote(current.request.env.http_web2py_component_location))
+              if current.request.env.http_web2py_component_location else ''),
+            ' to view this content.',
+            _class='not-authorized alert alert-block'))
         messages.lock_keys = True
 
         # for "remember me" option
         response = current.response
         if auth and auth.remember:
             # when user wants to be logged in for longer
-            response.cookies[response.session_id_name]["expires"] = \
-                auth.expiration
+            response.session_cookie_expires = auth.expiration
         if signature:
             self.define_signature()
         else:
             self.signature = None
+
+    def get_vars_next(self):
+        next = current.request.vars._next
+        if isinstance(next, (list, tuple)):
+            next = next[0]
+        return next
 
     def _get_user_id(self):
         "accessor for auth.user_id"
@@ -1260,29 +1362,54 @@ class Auth(object):
     def navbar(self, prefix='Welcome', action=None,
                separators=(' [ ', ' | ', ' ] '), user_identifier=DEFAULT,
                referrer_actions=DEFAULT, mode='default'):
-        def Anr(*a,**b):
-            b['_rel']='nofollow'
-            return A(*a,**b)
-        referrer_actions = [] if not referrer_actions else referrer_actions
-        request = current.request
-        asdropdown = (mode == 'dropdown')
+        """ Navbar with support for more templates
+        This uses some code from the old navbar.
+
+        Keyword arguments:
+        mode -- see options for list of
+
+        """
+        items = []  # Hold all menu items in a list
+        self.bar = ''  # The final
         T = current.T
-        if isinstance(prefix, str):
-            prefix = T(prefix)
-        if prefix:
-            prefix = prefix.strip() + ' '
+        referrer_actions = [] if not referrer_actions else referrer_actions
         if not action:
             action = self.url(self.settings.function)
-        s1, s2, s3 = separators
+
+        request = current.request
         if URL() == action:
             next = ''
         else:
             next = '?_next=' + urllib.quote(URL(args=request.args,
                                                 vars=request.get_vars))
-        href = lambda function: '%s/%s%s' % (action, function,
-                                             next if referrer_actions is DEFAULT or function in referrer_actions else '')
+        href = lambda function: '%s/%s%s' % (action, function, next
+                                             if referrer_actions is DEFAULT
+                                             or function in referrer_actions
+                                             else '')
+        if isinstance(prefix, str):
+            prefix = T(prefix)
+        if prefix:
+            prefix = prefix.strip() + ' '
 
-        if self.user_id:
+        def Anr(*a, **b):
+            b['_rel'] = 'nofollow'
+            return A(*a, **b)
+
+        if self.user_id:  # User is logged in
+            logout_next = self.settings.logout_next
+            items.append({'name': T('Logout'),
+                          'href': '%s/logout?_next=%s' % (action,
+                                                          urllib.quote(
+                                                          logout_next)),
+                          'icon': 'icon-off'})
+            if not 'profile' in self.settings.actions_disabled:
+                items.append({'name': T('Profile'), 'href': href('profile'),
+                              'icon': 'icon-user'})
+            if not 'change_password' in self.settings.actions_disabled:
+                items.append({'name': T('Password'),
+                              'href': href('change_password'),
+                              'icon': 'icon-lock'})
+
             if user_identifier is DEFAULT:
                 user_identifier = '%(first_name)s'
             if callable(user_identifier):
@@ -1293,75 +1420,153 @@ class Auth(object):
                 user_identifier = user_identifier % self.user
             if not user_identifier:
                 user_identifier = ''
-            logout = Anr(T('Logout'), _href='%s/logout?_next=%s' %
-                      (action, urllib.quote(self.settings.logout_next)))
-            profile = Anr(T('Profile'), _href=href('profile'))
-            password = Anr(T('Password'), _href=href('change_password'))
-            bar = SPAN(
-                prefix, user_identifier, s1, logout, s3, _class='auth_navbar')
-
-            if asdropdown:
-                logout = LI(Anr(I(_class='icon-off'), ' ' + T('Logout'), _href='%s/logout?_next=%s' %
-                              (action, urllib.quote(self.settings.logout_next))))  # the space before T('Logout') is intentional. It creates a gap between icon and text
-                profile = LI(Anr(I(_class='icon-user'), ' ' +
-                             T('Profile'), _href=href('profile')))
-                password = LI(Anr(I(_class='icon-lock'), ' ' +
-                              T('Password'), _href=href('change_password')))
-                bar = UL(logout, _class='dropdown-menu')
-                         # logout will be the last item in list
-
-            if not 'profile' in self.settings.actions_disabled:
-                if not asdropdown:
-                    bar.insert(-1, s2)
-                bar.insert(-1, profile)
-            if not 'change_password' in self.settings.actions_disabled:
-                if not asdropdown:
-                    bar.insert(-1, s2)
-                bar.insert(-1, password)
-        else:
-            login = Anr(T('Login'), _href=href('login'))
-            register = Anr(T('Register'), _href=href('register'))
-            retrieve_username = Anr(
-                T('Forgot username?'), _href=href('retrieve_username'))
-            lost_password = Anr(
-                T('Lost password?'), _href=href('request_reset_password'))
-            bar = SPAN(s1, login, s3, _class='auth_navbar')
-
-            if asdropdown:
-                login = LI(Anr(I(_class='icon-off'), ' ' + T('Login'), _href=href('login')))  # the space before T('Login') is intentional. It creates a gap between icon and text
-                register = LI(Anr(I(_class='icon-user'),
-                              ' ' + T('Register'), _href=href('register')))
-                retrieve_username = LI(Anr(I(_class='icon-edit'), ' ' + T(
-                    'Forgot username?'), _href=href('retrieve_username')))
-                lost_password = LI(Anr(I(_class='icon-lock'), ' ' + T(
-                    'Lost password?'), _href=href('request_reset_password')))
-                bar = UL(login, _class='dropdown-menu')
-                         # login will be the last item in list
-
+        else:  # User is not logged in
+            items.append({'name': T('Login'), 'href': href('login'),
+                          'icon': 'icon-off'})
             if not 'register' in self.settings.actions_disabled:
-                if not asdropdown:
-                    bar.insert(-1, s2)
-                bar.insert(-1, register)
-            if self.settings.use_username and not 'retrieve_username' \
-                    in self.settings.actions_disabled:
-                if not asdropdown:
-                    bar.insert(-1, s2)
-                bar.insert(-1, retrieve_username)
-            if not 'request_reset_password' \
-                    in self.settings.actions_disabled:
-                if not asdropdown:
-                    bar.insert(-1, s2)
-                bar.insert(-1, lost_password)
+                items.append({'name': T('Register'), 'href': href('register'),
+                              'icon': 'icon-user'})
+            if not 'request_reset_password' in self.settings.actions_disabled:
+                items.append({'name': T('Lost password?'),
+                              'href': href('request_reset_password'),
+                              'icon': 'icon-lock'})
+            if (self.settings.use_username and not
+                    'retrieve_username' in self.settings.actions_disabled):
+                items.append({'name': T('Forgot username?'),
+                             'href': href('retrieve_username'),
+                             'icon': 'icon-edit'})
 
-        if asdropdown:
-            bar.insert(-1, LI('', _class='divider'))
+        def menu():  # For inclusion in MENU
+            self.bar = [(items[0]['name'], False, items[0]['href'], [])]
+            del items[0]
+            for item in items:
+                self.bar[0][3].append((item['name'], False, item['href']))
+
+        def bootstrap3():  # Default web2py scaffolding
+            def rename(icon): return icon+' '+icon.replace('icon','glyphicon')
+            self.bar = UL(LI(Anr(I(_class=rename('icon '+items[0]['icon'])),
+                                 ' ' + items[0]['name'],
+                                 _href=items[0]['href'])),_class='dropdown-menu')
+            del items[0]
+            for item in items:
+                self.bar.insert(-1, LI(Anr(I(_class=rename('icon '+item['icon'])),
+                                           ' ' + item['name'],
+                                           _href=item['href'])))
+            self.bar.insert(-1, LI('', _class='divider'))
             if self.user_id:
-                bar = LI(Anr(prefix, user_identifier, _href='#'),
-                         bar, _class='dropdown')
+                self.bar = LI(Anr(prefix, user_identifier, _href='#'),
+                              self.bar,_class='dropdown')
             else:
-                bar = LI(Anr(T('Login'), _href='#'),
-                         bar, _class='dropdown')
-        return bar
+                self.bar = LI(Anr(T('Login'),
+                                  _href='#',_class="dropdown-toggle",
+                                  data={'toggle':'dropdown'}), self.bar,
+                              _class='dropdown')
+                
+
+
+        def bare():
+            """ In order to do advanced customization we only need the
+            prefix, the user_identifier and the href attribute of items
+
+            Example:
+
+            # in module custom_layout.py
+            from gluon import *
+            def navbar(auth_navbar):
+                bar = auth_navbar
+                user = bar["user"]
+
+                if not user:
+                    btn_login = A(current.T("Login"),
+                                  _href=bar["login"],
+                                  _class="btn btn-success",
+                                  _rel="nofollow")
+                    btn_register = A(current.T("Sign up"),
+                                     _href=bar["register"],
+                                     _class="btn btn-primary",
+                                     _rel="nofollow")
+                    return DIV(btn_register, btn_login, _class="btn-group")
+                else:
+                    toggletext = "%s back %s" % (bar["prefix"], user)
+                    toggle = A(toggletext,
+                               _href="#",
+                               _class="dropdown-toggle",
+                               _rel="nofollow",
+                               **{"_data-toggle": "dropdown"})
+                    li_profile = LI(A(I(_class="icon-user"), ' ',
+                                      current.T("Account details"),
+                                      _href=bar["profile"], _rel="nofollow"))
+                    li_custom = LI(A(I(_class="icon-book"), ' ',
+                                     current.T("My Agenda"),
+                                     _href="#", rel="nofollow"))
+                    li_logout = LI(A(I(_class="icon-off"), ' ',
+                                     current.T("logout"),
+                                     _href=bar["logout"], _rel="nofollow"))
+                    dropdown = UL(li_profile,
+                                  li_custom,
+                                  LI('', _class="divider"),
+                                  li_logout,
+                                  _class="dropdown-menu", _role="menu")
+
+                    return LI(toggle, dropdown, _class="dropdown")
+
+            # in models db.py
+            import custom_layout as custom
+
+            # in layout.html
+            <ul id="navbar" class="nav pull-right">
+                {{='auth' in globals() and \
+                  custom.navbar(auth.navbar(mode='bare')) or ''}}</ul>
+
+            """
+            bare = {}
+
+            bare['prefix'] = prefix
+            bare['user'] = user_identifier if self.user_id else None
+
+            for i in items:
+                if i['name'] == T('Login'):
+                    k = 'login'
+                elif i['name'] == T('Register'):
+                    k = 'register'
+                elif i['name'] == T('Lost password?'):
+                    k = 'request_reset_password'
+                elif i['name'] == T('Forgot username?'):
+                    k = 'retrieve_username'
+                elif i['name'] == T('Logout'):
+                    k = 'logout'
+                elif i['name'] == T('Profile'):
+                    k = 'profile'
+                elif i['name'] == T('Password'):
+                    k = 'change_password'
+
+                bare[k] = i['href']
+
+            self.bar = bare
+
+        options = {'asmenu': menu,
+                   'dropdown': bootstrap3,
+                   'bare': bare
+                   }  # Define custom modes.
+
+        if mode in options and callable(options[mode]):
+            options[mode]()
+        else:
+            s1, s2, s3 = separators
+            if self.user_id:
+                self.bar = SPAN(prefix, user_identifier, s1,
+                                Anr(items[0]['name'],
+                                _href=items[0]['href']), s3,
+                                _class='auth_navbar')
+            else:
+                self.bar = SPAN(s1, Anr(items[0]['name'],
+                                _href=items[0]['href']), s3,
+                                _class='auth_navbar')
+            for item in items[1:]:
+                self.bar.insert(-1, s2)
+                self.bar.insert(-1, Anr(item['name'], _href=item['href']))
+
+        return self.bar
 
     def __get_migrate(self, tablename, migrate=True):
 
@@ -1376,7 +1581,8 @@ class Auth(object):
                                  tables,
                                  archive_db=None,
                                  archive_names='%(tablename)s_archive',
-                                 current_record='current_record'):
+                                 current_record='current_record',
+                                 current_record_label=None):
         """
         to enable full record versioning (including auth tables):
 
@@ -1403,13 +1609,18 @@ class Auth(object):
         does automatically.
 
         """
-        tables = [table for table in tables]
+        current_record_label = current_record_label or current.T(
+            current_record.replace('_',' ').title())
         for table in tables:
-            if 'modified_on' in table.fields() and not current_record in table.fields():
+            fieldnames = table.fields()
+            if ('id' in fieldnames and
+                'modified_on' in fieldnames and
+                not current_record in fieldnames):
                 table._enable_record_versioning(
                     archive_db=archive_db,
                     archive_name=archive_names,
-                    current_record=current_record)
+                    current_record=current_record,
+                    current_record_label=current_record_label)
 
     def define_signature(self):
         db = self.db
@@ -1424,7 +1635,7 @@ class Auth(object):
         def represent(id, record=None, s=settings):
             try:
                 user = s.table_user(id)
-                return '%s %s' % (user.get("first_name", user.get("email")), 
+                return '%s %s' % (user.get("first_name", user.get("email")),
                                   user.get("last_name", ''))
             except:
                 return id
@@ -1455,7 +1666,7 @@ class Auth(object):
                   label=T('Modified By'),  ondelete=ondelete))
 
     def define_tables(self, username=None, signature=None,
-                      migrate=True, fake_migrate=False):
+                      migrate=None, fake_migrate=None):
         """
         to be called unless tables are defined manually
 
@@ -1471,6 +1682,8 @@ class Auth(object):
         """
 
         db = self.db
+        if migrate is None: migrate = db._migrate
+        if fake_migrate is None: fake_migrate = db._fake_migrate
         settings = self.settings
         if username is None:
             username = settings.use_username
@@ -1491,7 +1704,8 @@ class Auth(object):
                            min_length=settings.password_min_length)
         is_unique_email = [
             IS_EMAIL(error_message=self.messages.invalid_email),
-            IS_NOT_IN_DB(db, '%s.email' % settings.table_user_name)]
+            IS_NOT_IN_DB(db, '%s.email' % settings.table_user_name,
+                         error_message=self.messages.email_taken)]
         if not settings.email_case_sensitive:
             is_unique_email.insert(1, IS_LOWER())
         if not settings.table_user_name in db.tables:
@@ -1500,8 +1714,10 @@ class Auth(object):
                 settings.table_user_name, []) + signature_list
             if username or settings.cas_provider:
                 is_unique_username = \
-                    [IS_MATCH('[\w\.\-]+'),
-                     IS_NOT_IN_DB(db, '%s.username' % settings.table_user_name)]
+                    [IS_MATCH('[\w\.\-]+', strict=True,
+                              error_message=self.messages.invalid_username),
+                     IS_NOT_IN_DB(db, '%s.username' % settings.table_user_name,
+                                  error_message=self.messages.username_taken)]
                 if not settings.username_case_sensitive:
                     is_unique_username.insert(1, IS_LOWER())
                 db.define_table(
@@ -1695,18 +1911,22 @@ class Auth(object):
 
             auth.log_event(description='this happened', origin='auth')
         """
-        if not description:
+        if not self.settings.logging_enabled or not description:
             return
         elif self.is_logged_in():
             user_id = self.user.id
         else:
             user_id = None  # user unknown
         vars = vars or {}
+        # log messages should not be translated
+        if type(description).__name__ == 'lazyT':
+            description = description.m
         self.table_event().insert(
             description=str(description % vars),
             origin=origin, user_id=user_id)
 
-    def get_or_create_user(self, keys, update_fields=['email']):
+    def get_or_create_user(self, keys, update_fields=['email'],
+                           login=True, get=True):
         """
         Used for alternate login methods:
             If the user exists already then password is updated.
@@ -1733,9 +1953,12 @@ class Auth(object):
         if 'registration_id' in checks \
                 and user \
                 and user.registration_id \
-                and user.registration_id != keys.get('registration_id', None):
+                and ('registration_id' not in keys or user.registration_id != str(keys['registration_id'])):
             user = None  # THINK MORE ABOUT THIS? DO WE TRUST OPENID PROVIDER?
         if user:
+            if not get:
+                # added for register_bare to avoid overwriting users
+                return None
             update_keys = dict(registration_id=keys['registration_id'])
             for key in update_fields:
                 if key in keys:
@@ -1746,13 +1969,15 @@ class Auth(object):
                 guess = keys.get('email', 'anonymous').split('@')[0]
                 keys['first_name'] = keys.get('username', guess)
             user_id = table_user.insert(**table_user._filter_fields(keys))
-            user = self.user = table_user[user_id]
+            user = table_user[user_id]
             if self.settings.create_user_groups:
                 group_id = self.add_group(
                     self.settings.create_user_groups % user)
                 self.add_membership(group_id, user_id)
             if self.settings.everybody_group_id:
                 self.add_membership(self.settings.everybody_group_id, user_id)
+            if login:
+                self.user = user
         return user
 
     def basic(self, basic_auth_realm=False):
@@ -1764,26 +1989,26 @@ class Auth(object):
 
         reads current.request.env.http_authorization
         and returns basic_allowed,basic_accepted,user.
-        
+
         if basic_auth_realm is defined is a callable it's return value
         is used to set the basic authentication realm, if it's a string
         its content is used instead.  Otherwise basic authentication realm
         is set to the application name.
         If basic_auth_realm is None or False (the default) the behavior
         is to skip sending any challenge.
-        
+
         """
         if not self.settings.allow_basic_login:
             return (False, False, False)
         basic = current.request.env.http_authorization
         if basic_auth_realm:
             if callable(basic_auth_realm):
-                basic_auth_realm = basic_auth_auth()
+                basic_auth_realm = basic_auth_realm()
             elif isinstance(basic_auth_realm, (unicode, str)):
                 basic_realm = unicode(basic_auth_realm)
             elif basic_auth_realm is True:
                 basic_realm = u'' + current.request.application
-            http_401 = HTTP(401, u'Not Authorized', 
+            http_401 = HTTP(401, u'Not Authorized',
                        **{'WWW-Authenticate': u'Basic realm="' + basic_realm + '"'})
         if not basic or not basic[:6].lower() == 'basic ':
             if basic_auth_realm:
@@ -1801,13 +2026,15 @@ class Auth(object):
         """
         from gluon.settings import global_settings
         if global_settings.web2py_runtime_gae:
-            user = Row(self.db.auth_user._filter_fields(user, id=True))
+            user = Row(self.table_user()._filter_fields(user, id=True))
             delattr(user,'password')
         else:
             user = Row(user)
-            for key,value in user.items():
+            for key, value in user.items():
                 if callable(value) or key=='password':
                     delattr(user,key)
+        if self.settings.renew_session_onlogin:
+            current.session.renew(clear_session=not self.settings.keep_session_onlogin)
         current.session.auth = Storage(
             user = user,
             last_visit=current.request.now,
@@ -1816,31 +2043,63 @@ class Auth(object):
         self.user = user
         self.update_groups()
 
+    def _get_login_settings(self):
+        table_user = self.table_user()
+        userfield = self.settings.login_userfield or 'username' \
+            if 'username' in table_user.fields else 'email'
+        passfield = self.settings.password_field
+        return Storage({"table_user": table_user,
+                        "userfield": userfield,
+                        "passfield": passfield})
+
     def login_bare(self, username, password):
         """
-        logins user as specified by usernname (or email) and password
+        logins user as specified by username (or email) and password
         """
-        table_user = self.table_user()
-        if self.settings.login_userfield:
-            userfield = self.settings.login_userfield
-        elif 'username' in table_user.fields:
-            userfield = 'username'
-        else:
-            userfield = 'email'
-        passfield = self.settings.password_field
-        user = self.db(table_user[userfield] == username).select().first()
-        if user and user.get(passfield, False):
-            password = table_user[passfield].validate(password)[0]
-            if not user.registration_key and password == user[passfield]:
+        settings = self._get_login_settings()
+        user = settings.table_user(**{settings.userfield: \
+                       username})
+        if user and user.get(settings.passfield, False):
+            password = settings.table_user[
+                settings.passfield].validate(password)[0]
+            if ((user.registration_key is None or 
+                 not user.registration_key.strip()) and 
+                password == user[settings.passfield]):
                 self.login_user(user)
                 return user
         else:
             # user not in database try other login methods
             for login_method in self.settings.login_methods:
-                if login_method != self and login_method(username, password):
+                if login_method != self and \
+                    login_method(username, password):
                     self.user = username
                     return username
         return False
+
+    def register_bare(self, **fields):
+        """
+        registers a user as specified by username (or email)
+        and a raw password.
+        """
+        settings = self._get_login_settings()
+        if not fields.get(settings.passfield):
+            raise ValueError("register_bare: " +
+                             "password not provided or invalid")
+        elif not fields.get(settings.userfield):
+            raise ValueError("register_bare: " +
+                             "userfield not provided or invalid")
+        fields[settings.passfield
+            ] = settings.table_user[settings.passfield].validate(
+                    fields[settings.passfield])[0]
+        user = self.get_or_create_user(fields, login=False,
+                   get=False,
+                   update_fields=self.settings.update_fields)
+        if not user:
+            # get or create did not create a user (it ignores
+            # duplicate records)
+            return False
+        return user
+
 
     def cas_login(
         self,
@@ -1900,12 +2159,8 @@ class Auth(object):
         row = table(ticket=ticket)
         success = False
         if row:
-            if self.settings.login_userfield:
-                userfield = self.settings.login_userfield
-            elif 'username' in table.fields:
-                userfield = 'username'
-            else:
-                userfield = 'email'
+            userfield = self.settings.login_userfield or 'username' \
+                if 'username' in table.fields else 'email'
             # If ticket is a service Ticket and RENEW flag respected
             if ticket[0:3] == 'ST-' and \
                     not ((row.renew and renew) ^ renew):
@@ -1956,66 +2211,89 @@ class Auth(object):
         """
 
         table_user = self.table_user()
-        if self.settings.login_userfield:
-            username = self.settings.login_userfield
-        elif 'username' in table_user.fields:
-            username = 'username'
-        else:
-            username = 'email'
+        settings = self.settings
         if 'username' in table_user.fields or \
-                not self.settings.login_email_validate:
+                not settings.login_email_validate:
             tmpvalidator = IS_NOT_EMPTY(error_message=self.messages.is_empty)
+            if not settings.username_case_sensitive:
+                tmpvalidator = [IS_LOWER(), tmpvalidator]
         else:
             tmpvalidator = IS_EMAIL(error_message=self.messages.invalid_email)
-        old_requires = table_user[username].requires
-        table_user[username].requires = tmpvalidator
+            if not settings.email_case_sensitive:
+                tmpvalidator = [IS_LOWER(), tmpvalidator]
 
         request = current.request
         response = current.response
         session = current.session
 
-        passfield = self.settings.password_field
+        passfield = settings.password_field
         try:
             table_user[passfield].requires[-1].min_length = 0
         except:
             pass
 
         ### use session for federated login
-        if self.next:
-            session._auth_next = self.next
+        snext = self.get_vars_next()
+        if snext:
+            session._auth_next = snext
         elif session._auth_next:
-            self.next = session._auth_next
+            snext = session._auth_next
         ### pass
 
         if next is DEFAULT:
-            next = self.next or self.settings.login_next
+            # important for security
+            next = settings.login_next
+            user_next = snext
+            if user_next:
+                external = user_next.split('://')
+                if external[0].lower() in ['http', 'https', 'ftp']:
+                    host_next = user_next.split('//', 1)[-1].split('/')[0]
+                    if host_next in settings.cas_domains:
+                        next = user_next
+                else:
+                    next = user_next
         if onvalidation is DEFAULT:
-            onvalidation = self.settings.login_onvalidation
+            onvalidation = settings.login_onvalidation
         if onaccept is DEFAULT:
-            onaccept = self.settings.login_onaccept
+            onaccept = settings.login_onaccept
         if log is DEFAULT:
-            log = self.messages.login_log
+            log = self.messages['login_log']
 
-        onfail = self.settings.login_onfail
+        onfail = settings.login_onfail
 
         user = None  # default
 
+
+        #Setup the default field used for the form
+        multi_login = False
+        if self.settings.login_userfield:
+            username = self.settings.login_userfield
+        else:
+            if 'username' in table_user.fields:
+                username = 'username'
+            else:
+                username = 'email'
+            if self.settings.multi_login:
+                multi_login = True
+        old_requires = table_user[username].requires
+        table_user[username].requires = tmpvalidator
+
         # do we use our own login form, or from a central source?
-        if self.settings.login_form == self:
+        if settings.login_form == self:
             form = SQLFORM(
                 table_user,
                 fields=[username, passfield],
                 hidden=dict(_next=next),
-                showid=self.settings.showid,
+                showid=settings.showid,
                 submit_button=self.messages.login_button,
                 delete_label=self.messages.delete_label,
-                formstyle=self.settings.formstyle,
-                separator=self.settings.label_separator
+                formstyle=settings.formstyle,
+                separator=settings.label_separator
             )
 
-            if self.settings.remember_me_form:
+            if settings.remember_me_form:
                 ## adds a new input checkbox "remember me for longer"
-                if self.settings.formstyle != 'bootstrap':
+                if settings.formstyle != 'bootstrap':
                     addrow(form, XML("&nbsp;"),
                            DIV(XML("&nbsp;"),
                                INPUT(_type='checkbox',
@@ -2028,9 +2306,9 @@ class Auth(object):
                                self.messages.label_remember_me,
                                _for="auth_user_remember",
                                )), "",
-                           self.settings.formstyle,
+                           settings.formstyle,
                            'auth_user_remember__row')
-                elif self.settings.formstyle == 'bootstrap':
+                elif settings.formstyle == 'bootstrap':
                     addrow(form,
                            "",
                            LABEL(
@@ -2040,25 +2318,29 @@ class Auth(object):
                                self.messages.label_remember_me,
                                _class="checkbox"),
                            "",
-                           self.settings.formstyle,
+                           settings.formstyle,
                            'auth_user_remember__row')
 
-            captcha = self.settings.login_captcha or \
-                (self.settings.login_captcha != False and self.settings.captcha)
+            captcha = settings.login_captcha or \
+                (settings.login_captcha != False and settings.captcha)
             if captcha:
                 addrow(form, captcha.label, captcha, captcha.comment,
-                       self.settings.formstyle, 'captcha__row')
+                       settings.formstyle, 'captcha__row')
             accepted_form = False
 
-            if form.accepts(request, session,
+            if form.accepts(request, session if self.csrf_prevention else None,
                             formname='login', dbio=False,
                             onvalidation=onvalidation,
-                            hideerror=self.settings.hideerror):
+                            hideerror=settings.hideerror):
 
                 accepted_form = True
                 # check for username in db
-                user = self.db(table_user[username]
-                               == form.vars[username]).select().first()
+                entered_username = form.vars[username]
+                if multi_login and '@' in entered_username:
+                    # if '@' in username check for email, not username
+                    user = table_user(email = entered_username)
+                else:
+                    user = table_user(**{username: entered_username})
                 if user:
                     # user in db, check if registration pending or disabled
                     temp_user = user
@@ -2068,71 +2350,72 @@ class Auth(object):
                     elif temp_user.registration_key in ('disabled', 'blocked'):
                         response.flash = self.messages.login_disabled
                         return form
-                    elif not temp_user.registration_key is None and \
-                            temp_user.registration_key.strip():
+                    elif (not temp_user.registration_key is None 
+                          and temp_user.registration_key.strip()):
                         response.flash = \
                             self.messages.registration_verifying
                         return form
                     # try alternate logins 1st as these have the
                     # current version of the password
                     user = None
-                    for login_method in self.settings.login_methods:
+                    for login_method in settings.login_methods:
                         if login_method != self and \
                                 login_method(request.vars[username],
                                              request.vars[passfield]):
-                            if not self in self.settings.login_methods:
+                            if not self in settings.login_methods:
                                 # do not store password in db
                                 form.vars[passfield] = None
                             user = self.get_or_create_user(
-                                form.vars, self.settings.update_fields)
+                                form.vars, settings.update_fields)
                             break
                     if not user:
                         # alternates have failed, maybe because service inaccessible
-                        if self.settings.login_methods[0] == self:
+                        if settings.login_methods[0] == self:
                             # try logging in locally using cached credentials
                             if form.vars.get(passfield, '') == temp_user[passfield]:
                                 # success
                                 user = temp_user
                 else:
                     # user not in db
-                    if not self.settings.alternate_requires_registration:
+                    if not settings.alternate_requires_registration:
                         # we're allowed to auto-register users from external systems
-                        for login_method in self.settings.login_methods:
+                        for login_method in settings.login_methods:
                             if login_method != self and \
                                     login_method(request.vars[username],
                                                  request.vars[passfield]):
-                                if not self in self.settings.login_methods:
+                                if not self in settings.login_methods:
                                     # do not store password in db
                                     form.vars[passfield] = None
                                 user = self.get_or_create_user(
-                                    form.vars, self.settings.update_fields)
+                                    form.vars, settings.update_fields)
                                 break
                 if not user:
-                    self.log_event(self.messages.login_failed_log,
+                    self.log_event(self.messages['login_failed_log'],
                                    request.post_vars)
                     # invalid login
                     session.flash = self.messages.invalid_login
                     callback(onfail, None)
                     redirect(
                         self.url(args=request.args, vars=request.get_vars),
-                        client_side=True)
+                        client_side=settings.client_side)
 
         else:
             # use a central authentication server
-            cas = self.settings.login_form
+            cas = settings.login_form
             cas_user = cas.get_user()
 
             if cas_user:
                 cas_user[passfield] = None
                 user = self.get_or_create_user(
                     table_user._filter_fields(cas_user),
-                    self.settings.update_fields)
+                    settings.update_fields)
             elif hasattr(cas, 'login_form'):
                 return cas.login_form()
             else:
                 # we need to pass through login again before going on
-                next = self.url(self.settings.function, args='login')
-                redirect(cas.login_url(next), client_side=True)
+                next = self.url(settings.function, args='login')
+                redirect(cas.login_url(next),
+                         client_side=settings.client_side)
 
         # process authenticated users
         if user:
@@ -2142,20 +2425,20 @@ class Auth(object):
             self.login_user(user)
             session.auth.expiration = \
                 request.vars.get('remember', False) and \
-                self.settings.long_expiration or \
-                self.settings.expiration
+                settings.long_expiration or \
+                settings.expiration
             session.auth.remember = 'remember' in request.vars
             self.log_event(log, user)
             session.flash = self.messages.logged_in
 
         # how to continue
-        if self.settings.login_form == self:
+        if settings.login_form == self:
             if accepted_form:
                 callback(onaccept, form)
                 if next == session._auth_next:
                     session._auth_next = None
                 next = replace_id(next, form)
-                redirect(next, client_side=True)
+                redirect(next, client_side=settings.client_side)
 
             table_user[username].requires = old_requires
             return form
@@ -2164,7 +2447,7 @@ class Auth(object):
 
         if next == session._auth_next:
             del session._auth_next
-        redirect(next, client_side=True)
+        redirect(next, client_side=settings.client_side)
 
     def logout(self, next=DEFAULT, onlogout=DEFAULT, log=DEFAULT):
         """
@@ -2176,13 +2459,13 @@ class Auth(object):
         """
 
         if next is DEFAULT:
-            next = self.settings.logout_next
+            next = self.get_vars_next() or self.settings.logout_next
         if onlogout is DEFAULT:
             onlogout = self.settings.logout_onlogout
         if onlogout:
             onlogout(self.user)
         if log is DEFAULT:
-            log = self.messages.logout_log
+            log = self.messages['logout_log']
         if self.user:
             self.log_event(log, self.user)
         if self.settings.login_form != self:
@@ -2192,6 +2475,8 @@ class Auth(object):
                 next = cas.logout_url(next)
 
         current.session.auth = None
+        if self.settings.renew_session_onlogout:
+            current.session.renew(clear_session=not self.settings.keep_session_onlogout)
         current.session.flash = self.messages.logged_out
         if not next is None:
             redirect(next)
@@ -2216,18 +2501,21 @@ class Auth(object):
         response = current.response
         session = current.session
         if self.is_logged_in():
-            redirect(self.settings.logged_url, client_side=True)
+            redirect(self.settings.logged_url,
+                     client_side=self.settings.client_side)
         if next is DEFAULT:
-            next = self.next or self.settings.register_next
+            next = self.get_vars_next() or self.settings.register_next
         if onvalidation is DEFAULT:
             onvalidation = self.settings.register_onvalidation
         if onaccept is DEFAULT:
             onaccept = self.settings.register_onaccept
         if log is DEFAULT:
-            log = self.messages.register_log
+            log = self.messages['register_log']
 
         table_user = self.table_user()
-        if 'username' in table_user.fields:
+        if self.settings.login_userfield:
+            username = self.settings.login_userfield
+        elif 'username' in table_user.fields:
             username = 'username'
         else:
             username = 'email'
@@ -2264,6 +2552,7 @@ class Auth(object):
                 if item:
                     form.custom.widget.password_two = \
                         INPUT(_name="password_two", _type="password",
+                              _class="password",
                               requires=IS_EXPR(
                               'value==%s' %
                               repr(request.vars.get(passfield, None)),
@@ -2271,7 +2560,7 @@ class Auth(object):
 
                     if formstyle == 'bootstrap':
                         form.custom.widget.password_two[
-                            '_class'] = 'input-xlarge'
+                            '_class'] = 'span4'
 
                     addrow(
                         form, self.messages.verify_password +
@@ -2287,9 +2576,17 @@ class Auth(object):
             addrow(form, captcha.label, captcha,
                    captcha.comment, self.settings.formstyle, 'captcha__row')
 
+        #Add a message if specified
+        if self.settings.pre_registration_div:
+            addrow(form, '',
+                   DIV(_id="pre-reg", *self.settings.pre_registration_div),
+                   '', formstyle, '')
+
         table_user.registration_key.default = key = web2py_uuid()
-        if form.accepts(request, session, formname='register',
-                        onvalidation=onvalidation, hideerror=self.settings.hideerror):
+        if form.accepts(request, session if self.csrf_prevention else None,
+                        formname='register',
+                        onvalidation=onvalidation,
+                        hideerror=self.settings.hideerror):
             description = self.messages.group_description % form.vars
             if self.settings.create_user_groups:
                 group_id = self.add_group(
@@ -2301,13 +2598,12 @@ class Auth(object):
             if self.settings.registration_requires_verification:
                 link = self.url(
                     self.settings.function, args=('verify_email', key), scheme=True)
-
-                if not self.settings.mailer or \
-                   not self.settings.mailer.send(
-                    to=form.vars.email,
-                    subject=self.messages.verify_email_subject,
-                    message=self.messages.verify_email
-                        % dict(key=key, link=link)):
+                d = dict(request.vars)
+                d.update(dict(key=key, link=link,username=form.vars[username]))
+                if not (self.settings.mailer and self.settings.mailer.send(
+                        to=form.vars.email,
+                        subject=self.messages.verify_email_subject,                    
+                        message=self.messages.verify_email % d)):
                     self.db.rollback()
                     response.flash = self.messages.unable_send_email
                     return form
@@ -2321,9 +2617,7 @@ class Auth(object):
                 if not self.settings.registration_requires_verification:
                     table_user[form.vars.id] = dict(registration_key='')
                 session.flash = self.messages.registration_successful
-                user = self.db(
-                    table_user[username] == form.vars[username]
-                    ).select().first()
+                user = table_user(**{username: form.vars[username]})
                 self.login_user(user)
                 session.flash = self.messages.logged_in
             self.log_event(log, form.vars)
@@ -2332,7 +2626,7 @@ class Auth(object):
                 next = self.url(args=request.args)
             else:
                 next = replace_id(next, form)
-            redirect(next, client_side=True)
+            redirect(next, client_side=self.settings.client_side)
         return form
 
     def is_logged_in(self):
@@ -2374,7 +2668,7 @@ class Auth(object):
         if current.session.auth and current.session.auth.user:
             current.session.auth.user.registration_key = user.registration_key
         if log is DEFAULT:
-            log = self.messages.verify_email_log
+            log = self.messages['verify_email_log']
         if next is DEFAULT:
             next = self.settings.verify_email_next
         if onaccept is DEFAULT:
@@ -2411,13 +2705,13 @@ class Auth(object):
             response.flash = self.messages.function_disabled
             return ''
         if next is DEFAULT:
-            next = self.next or self.settings.retrieve_username_next
+            next = self.get_vars_next() or self.settings.retrieve_username_next
         if onvalidation is DEFAULT:
             onvalidation = self.settings.retrieve_username_onvalidation
         if onaccept is DEFAULT:
             onaccept = self.settings.retrieve_username_onaccept
         if log is DEFAULT:
-            log = self.messages.retrieve_username_log
+            log = self.messages['retrieve_username_log']
         old_requires = table_user.email.requires
         table_user.email.requires = [IS_IN_DB(self.db, table_user.email,
             error_message=self.messages.invalid_email)]
@@ -2434,21 +2728,22 @@ class Auth(object):
             addrow(form, captcha.label, captcha,
                    captcha.comment, self.settings.formstyle, 'captcha__row')
 
-        if form.accepts(request, session,
+        if form.accepts(request, session if self.csrf_prevention else None,
                         formname='retrieve_username', dbio=False,
                         onvalidation=onvalidation, hideerror=self.settings.hideerror):
-            user = table_user(email=form.vars.email)
-            if not user:
+            users = table_user._db(table_user.email==form.vars.email).select()
+            if not users:
                 current.session.flash = \
                     self.messages.invalid_email
                 redirect(self.url(args=request.args))
-            username = user.username
+            username = ', '.join(u.username for u in users)
             self.settings.mailer.send(to=form.vars.email,
                     subject=self.messages.retrieve_username_subject,
                     message=self.messages.retrieve_username
                      % dict(username=username))
             session.flash = self.messages.email_sent
-            self.log_event(log, user)
+            for user in users:
+                self.log_event(log, user)
             callback(onaccept, form)
             if not next:
                 next = self.url(args=request.args)
@@ -2493,13 +2788,13 @@ class Auth(object):
             response.flash = self.messages.function_disabled
             return ''
         if next is DEFAULT:
-            next = self.next or self.settings.retrieve_password_next
+            next = self.get_vars_next() or self.settings.retrieve_password_next
         if onvalidation is DEFAULT:
             onvalidation = self.settings.retrieve_password_onvalidation
         if onaccept is DEFAULT:
             onaccept = self.settings.retrieve_password_onaccept
         if log is DEFAULT:
-            log = self.messages.retrieve_password_log
+            log = self.messages['retrieve_password_log']
         old_requires = table_user.email.requires
         table_user.email.requires = [IS_IN_DB(self.db, table_user.email,
             error_message=self.messages.invalid_email)]
@@ -2512,7 +2807,7 @@ class Auth(object):
                        formstyle=self.settings.formstyle,
                        separator=self.settings.label_separator
                        )
-        if form.accepts(request, session,
+        if form.accepts(request, session if self.csrf_prevention else None,
                         formname='retrieve_password', dbio=False,
                         onvalidation=onvalidation, hideerror=self.settings.hideerror):
             user = table_user(email=form.vars.email)
@@ -2526,9 +2821,10 @@ class Auth(object):
                 redirect(self.url(args=request.args))
             password = self.random_password()
             passfield = self.settings.password_field
-            d = dict(
-                passfield=str(table_user[passfield].validate(password)[0]),
-                registration_key='')
+            d = {
+                passfield: str(table_user[passfield].validate(password)[0]),
+                'registration_key': ''
+                }
             user.update_record(**d)
             if self.settings.mailer and \
                self.settings.mailer.send(to=form.vars.email,
@@ -2569,7 +2865,7 @@ class Auth(object):
         session = current.session
 
         if next is DEFAULT:
-            next = self.next or self.settings.reset_password_next
+            next = self.get_vars_next() or self.settings.reset_password_next
         try:
             key = request.vars.key or getarg(-1)
             t0 = int(key.split('-')[0])
@@ -2580,7 +2876,7 @@ class Auth(object):
                 raise Exception
         except Exception:
             session.flash = self.messages.invalid_reset_password
-            redirect(next, client_side=True)
+            redirect(next, client_side=self.settings.client_side)
         passfield = self.settings.password_field
         form = SQLFORM.factory(
             Field('new_password', 'password',
@@ -2605,7 +2901,7 @@ class Auth(object):
             session.flash = self.messages.password_changed
             if self.settings.login_after_password_change:
                 self.login_user(user)
-            redirect(next, client_side=True)
+            redirect(next, client_side=self.settings.client_side)
         return form
 
     def request_reset_password(
@@ -2630,7 +2926,7 @@ class Auth(object):
                 (self.settings.retrieve_password_captcha != False and self.settings.captcha)
 
         if next is DEFAULT:
-            next = self.next or self.settings.request_reset_password_next
+            next = self.get_vars_next() or self.settings.request_reset_password_next
         if not self.settings.mailer:
             response.flash = self.messages.function_disabled
             return ''
@@ -2639,13 +2935,20 @@ class Auth(object):
         if onaccept is DEFAULT:
             onaccept = self.settings.reset_password_onaccept
         if log is DEFAULT:
-            log = self.messages.reset_password_log
-        table_user.email.requires = [
-            IS_EMAIL(error_message=self.messages.invalid_email),
-            IS_IN_DB(self.db, table_user.email,
-                     error_message=self.messages.invalid_email)]
+            log = self.messages['reset_password_log']
+        userfield = self.settings.login_userfield or 'username' \
+            if 'username' in table_user.fields else 'email'        
+        if userfield=='email':
+            table_user.email.requires = [
+                IS_EMAIL(error_message=self.messages.invalid_email),
+                IS_IN_DB(self.db, table_user.email,
+                         error_message=self.messages.invalid_email)]
+        else:
+            table_user.username.requires = [
+                IS_IN_DB(self.db, table_user.username,
+                         error_message=self.messages.invalid_username)]
         form = SQLFORM(table_user,
-                       fields=['email'],
+                       fields=[userfield],
                        hidden=dict(_next=next),
                        showid=self.settings.showid,
                        submit_button=self.messages.password_reset_button,
@@ -2656,17 +2959,19 @@ class Auth(object):
         if captcha:
             addrow(form, captcha.label, captcha,
                    captcha.comment, self.settings.formstyle, 'captcha__row')
-        if form.accepts(request, session,
+        if form.accepts(request, session if self.csrf_prevention else None,
                         formname='reset_password', dbio=False,
                         onvalidation=onvalidation,
                         hideerror=self.settings.hideerror):
-            user = table_user(email=form.vars.email)
+            user = table_user(**{userfield:form.vars.get(userfield)})
             if not user:
-                session.flash = self.messages.invalid_email
-                redirect(self.url(args=request.args), client_side=True)
+                session.flash = self.messages['invalid_%s' % userfield]
+                redirect(self.url(args=request.args),
+                         client_side=self.settings.client_side)
             elif user.registration_key in ('pending', 'disabled', 'blocked'):
                 session.flash = self.messages.registration_pending
-                redirect(self.url(args=request.args), client_side=True)
+                redirect(self.url(args=request.args),
+                         client_side=self.settings.client_side)
             if self.email_reset_password(user):
                 session.flash = self.messages.email_sent
             else:
@@ -2677,7 +2982,7 @@ class Auth(object):
                 next = self.url(args=request.args)
             else:
                 next = replace_id(next, form)
-            redirect(next, client_side=True)
+            redirect(next, client_side=self.settings.client_side)
         # old_requires = table_user.email.requires
         return form
 
@@ -2686,11 +2991,12 @@ class Auth(object):
         link = self.url(self.settings.function,
                         args=('reset_password', reset_password_key),
                         scheme=True)
-        if self.settings.mailer.send(
+        d = dict(user)
+        d.update(dict(key=reset_password_key, link=link))
+        if self.settings.mailer and self.settings.mailer.send(
             to=user.email,
             subject=self.messages.reset_password_subject,
-            message=self.messages.reset_password %
-                dict(key=reset_password_key, link=link)):
+            message=self.messages.reset_password % d):
             user.update_record(reset_password_key=reset_password_key)
             return True
         return False
@@ -2722,7 +3028,8 @@ class Auth(object):
         """
 
         if not self.is_logged_in():
-            redirect(self.settings.login_url, client_side=True)
+            redirect(self.settings.login_url,
+                     client_side=self.settings.client_side)
         db = self.db
         table_user = self.table_user()
         s = db(table_user.id == self.user.id)
@@ -2730,13 +3037,13 @@ class Auth(object):
         request = current.request
         session = current.session
         if next is DEFAULT:
-            next = self.next or self.settings.change_password_next
+            next = self.get_vars_next() or self.settings.change_password_next
         if onvalidation is DEFAULT:
             onvalidation = self.settings.change_password_onvalidation
         if onaccept is DEFAULT:
             onaccept = self.settings.change_password_onaccept
         if log is DEFAULT:
-            log = self.messages.change_password_log
+            log = self.messages['change_password_log']
         passfield = self.settings.password_field
         form = SQLFORM.factory(
             Field('old_password', 'password',
@@ -2760,7 +3067,7 @@ class Auth(object):
                         onvalidation=onvalidation,
                         hideerror=self.settings.hideerror):
 
-            if not form.vars['old_password'] == s.select().first()[passfield]:
+            if not form.vars['old_password'] == s.select(limitby=(0,1), orderby_on_limitby=False).first()[passfield]:
                 form.errors['old_password'] = self.messages.invalid_password
             else:
                 d = {passfield: str(form.vars.new_password)}
@@ -2772,7 +3079,7 @@ class Auth(object):
                     next = self.url(args=request.args)
                 else:
                     next = replace_id(next, form)
-                redirect(next, client_side=True)
+                redirect(next, client_side=self.settings.client_side)
         return form
 
     def profile(
@@ -2792,19 +3099,20 @@ class Auth(object):
 
         table_user = self.table_user()
         if not self.is_logged_in():
-            redirect(self.settings.login_url, client_side=True)
+            redirect(self.settings.login_url,
+                     client_side=self.settings.client_side)
         passfield = self.settings.password_field
         table_user[passfield].writable = False
         request = current.request
         session = current.session
         if next is DEFAULT:
-            next = self.next or self.settings.profile_next
+            next = self.get_vars_next() or self.settings.profile_next
         if onvalidation is DEFAULT:
             onvalidation = self.settings.profile_onvalidation
         if onaccept is DEFAULT:
             onaccept = self.settings.profile_onaccept
         if log is DEFAULT:
-            log = self.messages.profile_log
+            log = self.messages['profile_log']
         form = SQLFORM(
             table_user,
             self.user.id,
@@ -2815,21 +3123,34 @@ class Auth(object):
             delete_label=self.messages.delete_label,
             upload=self.settings.download_url,
             formstyle=self.settings.formstyle,
-            separator=self.settings.label_separator
+            separator=self.settings.label_separator,
+            deletable=self.settings.allow_delete_accounts,
             )
         if form.accepts(request, session,
                         formname='profile',
-                        onvalidation=onvalidation, hideerror=self.settings.hideerror):
+                        onvalidation=onvalidation,
+                        hideerror=self.settings.hideerror):
             self.user.update(table_user._filter_fields(form.vars))
             session.flash = self.messages.profile_updated
             self.log_event(log, self.user)
             callback(onaccept, form)
+            if form.deleted:
+                return self.logout()
             if not next:
                 next = self.url(args=request.args)
             else:
                 next = replace_id(next, form)
-            redirect(next, client_side=True)
+            redirect(next, client_side=self.settings.client_side)
         return form
+
+    def run_login_onaccept(self):
+         onaccept = self.settings.login_onaccept
+         if onaccept:
+             form = Storage(dict(vars=self.user))
+             if not isinstance(onaccept,(list, tuple)):
+                 onaccept = [onaccept]
+             for callback in onaccept:
+                 callback(form)
 
     def is_impersonating(self):
         return self.is_logged_in() and 'impersonator' in current.session.auth
@@ -2854,7 +3175,7 @@ class Auth(object):
             user_id = current.request.post_vars.user_id
         if user_id and user_id != self.user.id and user_id != '0':
             if not self.has_permission('impersonate',
-                                       self.settings.table_user_name,
+                                       self.table_user(),
                                        user_id):
                 raise HTTP(403, "Forbidden")
             user = table_user(user_id)
@@ -2864,20 +3185,17 @@ class Auth(object):
             auth.user.update(
                 table_user._filter_fields(user, True))
             self.user = auth.user
-            onaccept = self.settings.login_onaccept
-            if onaccept:
-                form = Storage(dict(vars=self.user))
-                if not isinstance(onaccept,(list, tuple)):
-                    onaccept = [onaccept]
-                for callback in onaccept:
-                    callback(form)
-            log = self.messages.impersonate_log
+            self.update_groups()            
+            log = self.messages['impersonate_log']
             self.log_event(log, dict(id=current_id, other_id=auth.user.id))
+            self.run_login_onaccept()
         elif user_id in (0, '0'):
             if self.is_impersonating():
                 session.clear()
                 session.update(cPickle.loads(auth.impersonator))
                 self.user = session.auth.user
+                self.update_groups()
+                self.run_login_onaccept()
             return None
         if requested_id is DEFAULT and not request.post_vars:
             return SQLFORM.factory(Field('user_id', 'integer'))
@@ -2910,7 +3228,7 @@ class Auth(object):
             table_membership.user_id == self.user.id).select()
         table = TABLE()
         for membership in memberships:
-            table_group = self.db[self.settings.table_group_name]
+            table_group = self.table_group()
             groups = self.db(table_group.id == membership.group_id).select()
             if groups:
                 group = groups[0]
@@ -2926,7 +3244,7 @@ class Auth(object):
         """
         if current.request.ajax:
             raise HTTP(403, 'ACCESS DENIED')
-        return 'ACCESS DENIED'
+        return self.messages.access_denied
 
     def requires(self, condition, requires_login=True, otherwise=None):
         """
@@ -2942,7 +3260,7 @@ class Auth(object):
                 if requires_login:
                     if not user:
                         if current.request.ajax:
-                            raise HTTP(401)
+                            raise HTTP(401, self.messages.ajax_failed_authentication)
                         elif not otherwise is None:
                             if callable(otherwise):
                                 return otherwise()
@@ -2950,8 +3268,6 @@ class Auth(object):
                         elif self.settings.allow_basic_login_only or \
                                 basic_accepted or current.request.is_restful:
                             raise HTTP(403, "Not authorized")
-                        elif current.request.ajax:
-                            return A('login', _href=self.settings.login_url)
                         else:
                             next = self.here()
                             current.session.flash = current.response.flash
@@ -3004,7 +3320,7 @@ class Auth(object):
             return self.has_permission(name, table_name, record_id)
         return self.requires(has_permission, otherwise=otherwise)
 
-    def requires_signature(self, otherwise=None):
+    def requires_signature(self, otherwise=None, hash_vars=True):
         """
         decorator that prevents access to action if not logged in or
         if user logged in is not a member of group_id.
@@ -3012,7 +3328,7 @@ class Auth(object):
         group_id is calculated.
         """
         def verify():
-            return URL.verify(current.request, user_signature=True)
+            return URL.verify(current.request, user_signature=True, hash_vars=hash_vars)
         return self.requires(verify, otherwise)
 
     def add_group(self, role, description=''):
@@ -3022,7 +3338,7 @@ class Auth(object):
 
         group_id = self.table_group().insert(
             role=role, description=description)
-        self.log_event(self.messages.add_group_log,
+        self.log_event(self.messages['add_group_log'],
                        dict(group_id=group_id, role=role))
         return group_id
 
@@ -3079,7 +3395,7 @@ class Auth(object):
             r = True
         else:
             r = False
-        self.log_event(self.messages.has_membership_log,
+        self.log_event(self.messages['has_membership_log'],
                        dict(user_id=user_id, group_id=group_id, check=r))
         return r
 
@@ -3103,7 +3419,7 @@ class Auth(object):
         else:
             id = membership.insert(group_id=group_id, user_id=user_id)
         self.update_groups()
-        self.log_event(self.messages.add_membership_log,
+        self.log_event(self.messages['add_membership_log'],
                        dict(user_id=user_id, group_id=group_id))
         return id
 
@@ -3117,7 +3433,7 @@ class Auth(object):
         if not user_id and self.user:
             user_id = self.user.id
         membership = self.table_membership()
-        self.log_event(self.messages.del_membership_log,
+        self.log_event(self.messages['del_membership_log'],
                        dict(user_id=user_id, group_id=group_id))
         ret = self.db(membership.user_id
                       == user_id)(membership.group_id
@@ -3173,7 +3489,7 @@ class Auth(object):
         else:
             r = False
         if user_id:
-            self.log_event(self.messages.has_permission_log,
+            self.log_event(self.messages['has_permission_log'],
                            dict(user_id=user_id, name=name,
                                 table_name=table_name, record_id=record_id))
         return r
@@ -3193,14 +3509,14 @@ class Auth(object):
         if group_id == 0:
             group_id = self.user_group()
         record = self.db(permission.group_id == group_id)(permission.name == name)(permission.table_name == str(table_name))(
-                permission.record_id == long(record_id)).select().first()
+                permission.record_id == long(record_id)).select(limitby=(0,1), orderby_on_limitby=False).first()
         if record:
             id = record.id
         else:
             id = permission.insert(group_id=group_id, name=name,
                                    table_name=str(table_name),
                                    record_id=long(record_id))
-        self.log_event(self.messages.add_permission_log,
+        self.log_event(self.messages['add_permission_log'],
                        dict(permission_id=id, group_id=group_id,
                             name=name, table_name=table_name,
                             record_id=record_id))
@@ -3218,7 +3534,7 @@ class Auth(object):
         """
 
         permission = self.table_permission()
-        self.log_event(self.messages.del_permission_log,
+        self.log_event(self.messages['del_permission_log'],
                        dict(group_id=group_id, name=name,
                             table_name=table_name, record_id=record_id))
         return self.db(permission.group_id == group_id)(permission.name
@@ -3363,7 +3679,14 @@ class Auth(object):
              resolve=True,
              extra=None,
              menu_groups=None,
-             templates=None):
+             templates=None,
+             migrate=True,
+             controller=None,
+             function=None,
+             force_render=False,
+             groups=None):
+
+        if controller and function: resolve = False
 
         if not hasattr(self, '_wiki'):
             self._wiki = Wiki(self, render=render,
@@ -3372,16 +3695,20 @@ class Auth(object):
                               restrict_search=restrict_search,
                               env=env, extra=extra or {},
                               menu_groups=menu_groups,
-                              templates=templates)
+                              templates=templates,
+                              migrate=migrate,
+                              controller=controller,
+                              function=function,
+                              groups=groups)
         else:
             self._wiki.env.update(env or {})
+
         # if resolve is set to True, process request as wiki call
         # resolve=False allows initial setup without wiki redirection
         wiki = None
         if resolve:
-            action = str(current.request.args(0)).startswith("_")
-            if slug and not action:
-                wiki = self._wiki.read(slug)
+            if slug:
+                wiki = self._wiki.read(slug, force_render)
                 if isinstance(wiki, dict) and wiki.has_key('content'):
                     # We don't want to return a dict object, just the wiki
                     wiki = wiki['content']
@@ -3390,6 +3717,13 @@ class Auth(object):
             if isinstance(wiki, basestring):
                 wiki = XML(wiki)
             return wiki
+
+    def wikimenu(self):
+        """to be used in menu.py for app wide wiki menus"""
+        if (hasattr(self, "_wiki") and
+            self._wiki.settings.controller and
+            self._wiki.settings.function):
+            self._wiki.automenu()
 
 
 class Crud(object):
@@ -3443,7 +3777,7 @@ class Crud(object):
 
         messages = self.messages = Messages(current.T)
         messages.submit_button = 'Submit'
-        messages.delete_label = 'Check to delete:'
+        messages.delete_label = 'Check to delete'
         messages.record_created = 'Record Created'
         messages.record_updated = 'Record Updated'
         messages.record_deleted = 'Record Deleted'
@@ -3553,7 +3887,7 @@ class Crud(object):
         if ondelete is DEFAULT:
             ondelete = self.settings.update_ondelete
         if log is DEFAULT:
-            log = self.messages.update_log
+            log = self.messages['update_log']
         if deletable is DEFAULT:
             deletable = self.settings.update_deletable
         if message is DEFAULT:
@@ -3644,7 +3978,7 @@ class Crud(object):
         if onaccept is DEFAULT:
             onaccept = self.settings.create_onaccept
         if log is DEFAULT:
-            log = self.messages.create_log
+            log = self.messages['create_log']
         if message is DEFAULT:
             message = self.messages.record_created
         return self.update(
@@ -3830,6 +4164,7 @@ class Crud(object):
         """
         table = tables[0]
         fields = args.get('fields', table.fields)
+        validate = args.get('validate',True)
         request = current.request
         db = self.db
         if not (isinstance(table, db.Table) or table in db.tables):
@@ -3884,13 +4219,15 @@ class Crud(object):
                     if field.type[0:10] == 'reference ':
                         refsearch.append(self.get_query(field,
                                     opval, txtval, refsearch=True))
-                    else:
+                    elif validate:
                         value, error = field.validate(txtval)
                         if not error:
                             ### TODO deal with 'starts with', 'ends with', 'contains' on GAE
                             query &= self.get_query(field, opval, value)
                         else:
                             row[3].append(DIV(error, _class='error'))
+                    else:
+                        query &= self.get_query(field, opval, txtval)
                 selected.append(field)
         form = FORM(tbl, INPUT(_type="submit"))
         if selected:
@@ -4325,7 +4662,7 @@ class Service(object):
 
     # jsonrpc 2.0 error types.  records the following structure {code: (message,meaning)}
     jsonrpc_errors = {
-        -32700:	("Parse error. Invalid JSON was received by the server.",  "An error occurred on the server while parsing the JSON text."),
+        -32700:        ("Parse error. Invalid JSON was received by the server.",  "An error occurred on the server while parsing the JSON text."),
         -32600: ("Invalid Request", "The JSON sent is not a valid Request object."),
         -32601: ("Method not found", "The method does not exist / is not available."),
         -32602: ("Invalid params", "Invalid method parameter(s)."),
@@ -4356,7 +4693,9 @@ class Service(object):
         jsonrpc_2 = data.get('jsonrpc')
         if jsonrpc_2: #hand over to version 2 of the protocol
             return self.serve_jsonrpc2(data)
-        id, method, params = data['id'], data['method'], data.get('params', '')
+        id, method, params = data.get('id'), data.get('method'), data.get('params', [])
+        if id is None:
+            return return_error(0, 100, 'missing id')
         if not method in methods:
             return return_error(id, 100, 'method "%s" does not exist' % method)
         try:
@@ -4369,18 +4708,15 @@ class Service(object):
             return return_response(id, s)
         except Service.JsonRpcException, e:
             return return_error(id, e.code, e.info)
-        except BaseException:
-            etype, eval, etb = sys.exc_info()
-            code = 100
-            message = '%s: %s' % (etype.__name__, eval)
-            data = request.is_local and traceback.format_tb(etb)
-            return return_error(id, code, message, data)
         except:
             etype, eval, etb = sys.exc_info()
-            return return_error(id, 100, 'Exception %s: %s' % (etype, eval))
+            message = '%s: %s' % (etype.__name__, eval)
+            data = request.is_local and traceback.format_tb(etb)
+            logger.warning('jsonrpc exception %s\n%s' % (message, traceback.format_tb(etb)))
+            return return_error(id, 100, message, data)
 
     def serve_jsonrpc2(self, data=None, batch_element=False):
-                
+
         def return_response(id, result):
             if not must_respond:
                 return None
@@ -4389,13 +4725,12 @@ class Service(object):
 
         def return_error(id, code, message=None, data=None):
             error = {'code': code}
-            if message is None:
-                error['message'] =  Service.jsonrpc_errors[code][0]
-            else:
-                error['message'] = message
-            if data is None:
+            if Service.jsonrpc_errors.has_key(code):
+                error['message'] = Service.jsonrpc_errors[code][0]
                 error['data'] = Service.jsonrpc_errors[code][1]
-            else:
+            if message is not None:
+                error['message'] = message
+            if data is not None:
                 error['data'] = data
             return serializers.json({'jsonrpc': '2.0',
                                      'id': id,
@@ -4411,9 +4746,9 @@ class Service(object):
             :returns:
                 - True -- if successful
                 - False -- if no error should be reported (i.e. data is missing 'id' member)
-            
+
             :raises: JsonRPCException
-            
+
             """
 
             iparms = set(data.keys())
@@ -4429,8 +4764,8 @@ class Service(object):
 
             return True
 
-        
-            
+
+
         request = current.request
         response = current.response
         if not data:
@@ -4438,8 +4773,6 @@ class Service(object):
             try:
                 data = json_parser.loads(request.body.read())
             except ValueError: # decoding error in json lib
-                return return_error(None, -32700)
-            except json_parser.JSONDecodeError: # decoding error in simplejson lib 
                 return return_error(None, -32700)
 
         # Batch handling
@@ -4455,12 +4788,12 @@ class Service(object):
                 return "[" + ','.join(retlist) + "]"
         methods = self.jsonrpc2_procedures
         methods.update(self.jsonrpc_procedures)
-        
+
         try:
             must_respond = validate(data)
         except Service.JsonRpcException, e:
             return return_error(None, e.code, e.info)
-        
+
         id, method, params = data.get('id'), data['method'], data.get('params', '')
         if not method in methods:
             return return_error(id, -32601, data='Method "%s" does not exist' % method)
@@ -4479,15 +4812,12 @@ class Service(object):
             raise e
         except Service.JsonRpcException, e:
             return return_error(id, e.code, e.info)
-        except BaseException:
-            etype, eval, etb = sys.exc_info()
-            code = -32099
-            data = '%s: %s\n' % (etype.__name__, eval) + str(request.is_local and traceback.format_tb(etb))
-            return return_error(id, code, data=data)
         except:
             etype, eval, etb = sys.exc_info()
-            return return_error(id, -32099, data='Exception %s: %s' % (etype, eval))
-        
+            data = '%s: %s\n' % (etype.__name__, eval) + str(request.is_local and traceback.format_tb(etb))
+            logger.warning('%s: %s\n%s' % (etype.__name__, eval, traceback.format_tb(etb)))
+            return return_error(id, -32099, data=data)
+
 
     def serve_xmlrpc(self):
         request = current.request
@@ -4523,7 +4853,7 @@ class Service(object):
 
     def serve_soap(self, version="1.1"):
         try:
-            from contrib.pysimplesoap.server import SoapDispatcher
+            from gluon.contrib.pysimplesoap.server import SoapDispatcher
         except:
             return "pysimplesoap not installed in contrib"
         request = current.request
@@ -4547,9 +4877,15 @@ class Service(object):
         for method, (function, returns, args, doc) in procedures.iteritems():
             dispatcher.register_function(method, function, returns, args, doc)
         if request.env.request_method == 'POST':
+            fault = {}
             # Process normal Soap Operation
             response.headers['Content-Type'] = 'text/xml'
-            return dispatcher.dispatch(request.body.read())
+            xml = dispatcher.dispatch(request.body.read(), fault=fault)
+            if fault:
+                # May want to consider populating a ticket here...
+                response.status = 500
+            # return the soap response
+            return xml
         elif 'WSDL' in request.vars:
             # Return Web Service Description
             response.headers['Content-Type'] = 'text/xml'
@@ -4828,14 +5164,27 @@ class PluginManager(object):
 
 
 class Expose(object):
-    def __init__(self, base=None, basename='base', extensions=None, allow_download=True):
+    def __init__(self, base=None, basename=None, extensions=None, allow_download=True):
         """
-        extensions: an optional list of file extensions for filtering displayed files:
+        Usage:
+
+        def static():
+            return dict(files=Expose())
+
+        or
+
+        def static():
+            path = os.path.join(request.folder,'static','public')
+            return dict(files=Expose(path,basename='public'))
+
+        extensions:
+        an optional list of file extensions for filtering displayed files:
         ['.py', '.jpg']
         allow_download: whether to allow downloading selected files
         """
         current.session.forget()
         base = base or os.path.join(current.request.folder, 'static')
+        basename = basename or current.request.function
         self.basename = basename
         self.args = current.request.raw_args and \
             [arg for arg in current.request.raw_args.split('/') if arg] or []
@@ -4852,8 +5201,14 @@ class Expose(object):
                             if os.path.isdir(f) and not self.isprivate(f)]
         self.filenames = [f[len(path) - 1:] for f in sorted(glob.glob(path))
                             if not os.path.isdir(f) and not self.isprivate(f)]
+        if 'README' in self.filenames:
+            readme = open(os.path.join(filename,'README')).read()
+            self.paragraph = MARKMIN(readme)
+        else:
+            self.paragraph = None
         if extensions:
-            self.filenames = [f for f in self.filenames if os.path.splitext(f)[-1] in extensions]
+            self.filenames = [f for f in self.filenames
+                              if os.path.splitext(f)[-1] in extensions]
 
     def breadcrumbs(self, basename):
         path = []
@@ -4867,8 +5222,10 @@ class Expose(object):
 
     def table_folders(self):
         if self.folders:
-            return SPAN(H3('Folders'), TABLE(*[TR(TD(A(folder, _href=URL(args=self.args + [folder]))))
-                           for folder in self.folders]))
+            return SPAN(H3('Folders'), TABLE(
+                    *[TR(TD(A(folder, _href=URL(args=self.args + [folder]))))
+                      for folder in self.folders],
+                     **dict(_class="table")))
         return ''
 
     @staticmethod
@@ -4877,20 +5234,24 @@ class Expose(object):
 
     @staticmethod
     def isimage(f):
-        return os.path.splitext(f)[-1].lower() in ('.png', '.jpg', '.jpeg', '.gif', '.tiff')
+        return os.path.splitext(f)[-1].lower() in (
+            '.png', '.jpg', '.jpeg', '.gif', '.tiff')
 
     def table_files(self, width=160):
         if self.filenames:
-            return SPAN(H3('Files'), TABLE(*[TR(TD(A(f, _href=URL(args=self.args + [f]))),
-                          TD(IMG(_src=URL(args=self.args + [f]),
-                                 _style='max-width:%spx' % width)
-                                 if width and self.isimage(f) else ''))
-                           for f in self.filenames]))
+            return SPAN(H3('Files'),
+                        TABLE(*[TR(TD(A(f, _href=URL(args=self.args + [f]))),
+                                   TD(IMG(_src=URL(args=self.args + [f]),
+                                          _style='max-width:%spx' % width)
+                                      if width and self.isimage(f) else ''))
+                                for f in self.filenames],
+                               **dict(_class="table")))
         return ''
 
     def xml(self):
         return DIV(
             H2(self.breadcrumbs(self.basename)),
+            self.paragraph or '',
             self.table_folders(),
             self.table_files()).xml()
 
@@ -4933,23 +5294,53 @@ class Wiki(object):
         controller, function, args = items[0], items[1], items[2:]
         return LOAD(controller, function, args=args, ajax=True).xml()
 
-    def get_render(self):
+    def get_renderer(self):
         if isinstance(self.settings.render, basestring):
             r = getattr(self, "%s_render" % self.settings.render)
         elif callable(self.settings.render):
             r = self.settings.render
+        elif isinstance(self.settings.render, dict):
+            def custom_render(page):
+                if page.render:
+                    if page.render in self.settings.render.keys():
+                        my_render = self.settings.render[page.render]
+                    else:
+                        my_render = getattr(self, "%s_render" % page.render)
+                else:
+                    my_render = self.markmin_render
+                return my_render(page)
+            r = custom_render
         else:
-            raise ValueError("Invalid render type %s" % type(render))
+            raise ValueError(
+                "Invalid render type %s" % type(self.settings.render))
         return r
 
     def __init__(self, auth, env=None, render='markmin',
                  manage_permissions=False, force_prefix='',
                  restrict_search=False, extra=None,
-                 menu_groups=None, templates=None):
+                 menu_groups=None, templates=None, migrate=True,
+                 controller=None, function=None, groups=None):
 
-        settings = self.settings = Settings()
+        settings = self.settings = auth.settings.wiki
 
-        # render: "markmin", "html", ..., <function>
+        """render argument options:
+                - "markmin"
+                - "html"
+                - <function>
+                    Sets a custom render function
+                - dict(html=<function>, markmin=...):
+                    dict(...) allows multiple custom render functions
+                - "multiple"
+                    Is the same as {}. It enables per-record formats
+                    using builtins
+        """
+        engines = set(['markmin', 'html'])
+        show_engine = False
+        if render == "multiple":
+            render = {}
+        if isinstance(render, dict):
+            [engines.add(key) for key in render]
+            show_engine = True
         settings.render = render
         perms = settings.manage_permissions = manage_permissions
 
@@ -4958,11 +5349,16 @@ class Wiki(object):
         settings.extra = extra or {}
         settings.menu_groups = menu_groups
         settings.templates = templates
-
+        settings.controller = controller
+        settings.function = function
+        settings.groups = auth.user_groups.values() \
+            if groups is None else groups
+        
         db = auth.db
         self.env = env or {}
         self.env['component'] = Wiki.component
         self.auth = auth
+        self.wiki_menu_items = None
 
         if self.auth.user:
             self.settings.force_prefix = force_prefix % self.auth.user
@@ -4978,7 +5374,7 @@ class Wiki(object):
                               requires=[IS_SLUG(),
                                         IS_NOT_IN_DB(db, 'wiki_page.slug')],
                               writable=False),
-                        Field('title', unique=True),
+                        Field('title', length=255, unique=True),
                         Field('body', 'text', notnull=True),
                         Field('tags', 'list:string'),
                         Field('can_read', 'list:string',
@@ -4990,23 +5386,28 @@ class Wiki(object):
                               default=[Wiki.everybody]),
                         Field('changelog'),
                         Field('html', 'text',
-                              compute=self.get_render(),
+                              compute=self.get_renderer(),
                               readable=False, writable=False),
+                        Field('render', default="markmin",
+                              readable=show_engine,
+                              writable=show_engine,
+                              requires=IS_EMPTY_OR(
+                                  IS_IN_SET(engines))),
                         auth.signature],
-              'vars':{'format':'%(title)s'}}),
+                    'vars':{'format':'%(title)s', 'migrate':migrate}}),
             ('wiki_tag', {
                     'args':[
                         Field('name'),
                         Field('wiki_page', 'reference wiki_page'),
                         auth.signature],
-                    'vars':{'format':'%(name)s'}}),
+                    'vars':{'format':'%(title)s', 'migrate':migrate}}),
             ('wiki_media', {
                     'args':[
                         Field('wiki_page', 'reference wiki_page'),
                         Field('title', required=True),
                         Field('filename', 'upload', required=True),
                         auth.signature],
-                    'vars':{'format':'%(title)s'}})
+                    'vars':{'format':'%(title)s', 'migrate':migrate}}),
             ]
 
         # define only non-existent tables
@@ -5035,7 +5436,7 @@ class Wiki(object):
                     db.wiki_tag.insert(name=tag, wiki_page=id)
 
         def update_tags_update(dbset, page, db=db):
-            page = dbset.select().first()
+            page = dbset.select(limitby=(0,1)).first()
             db(db.wiki_tag.wiki_page == page.id).delete()
             for tag in page.tags or []:
                 tag = tag.strip().lower()
@@ -5043,8 +5444,11 @@ class Wiki(object):
                     db.wiki_tag.insert(name=tag, wiki_page=page.id)
         db.wiki_page._after_insert.append(update_tags_insert)
         db.wiki_page._after_update.append(update_tags_update)
-        if auth.user and check_credentials(current.request) and \
-                not 'wiki_editor' in auth.user_groups.values():
+
+        if (auth.user and
+            check_credentials(current.request, gae_login=False) and
+            not 'wiki_editor' in auth.user_groups.values() and
+            self.settings.groups == auth.user_groups.values()):
             group = db.auth_group(role='wiki_editor')
             gid = group.id if group else db.auth_group.insert(
                 role='wiki_editor')
@@ -5062,7 +5466,7 @@ class Wiki(object):
             self.settings.manage_permissions:
             return True
         elif self.auth.user:
-            groups = self.auth.user_groups.values()
+            groups = self.settings.groups
             if ('wiki_editor' in groups or
                 set(groups).intersection(set(page.can_read + page.can_edit)) or
                 page.created_by == self.auth.user.id):
@@ -5072,7 +5476,7 @@ class Wiki(object):
     def can_edit(self, page=None):
         if not self.auth.user:
             redirect(self.auth.settings.login_url)
-        groups = self.auth.user_groups.values()
+        groups = self.settings.groups
         return ('wiki_editor' in groups or
                 (page is None and 'wiki_author' in groups) or
                 not page is None and (
@@ -5082,27 +5486,40 @@ class Wiki(object):
     def can_manage(self):
         if not self.auth.user:
             return False
-        groups = self.auth.user_groups.values()
+        groups = self.settings.groups
         return 'wiki_editor' in groups
 
     def can_search(self):
         return True
 
     def can_see_menu(self):
-        if self.settings.menu_groups is None:
-            return True
         if self.auth.user:
-            groups = self.auth.user_groups.values()
-            if any(t in self.settings.menu_groups for t in groups):
+            if self.settings.menu_groups is None:
                 return True
+            else:
+                groups = self.settings.groups
+                if any(t in self.settings.menu_groups for t in groups):
+                    return True
         return False
 
     ### END POLICY
 
+    def automenu(self):
+        """adds the menu if not present"""
+        if (not self.wiki_menu_items and 
+            self.settings.controller and 
+            self.settings.function):
+            self.wiki_menu_items = self.menu(self.settings.controller,
+                                             self.settings.function)
+            current.response.menu += self.wiki_menu_items
+
     def __call__(self):
         request = current.request
-        automenu = self.menu(request.controller, request.function)
-        current.response.menu += automenu
+        settings = self.settings
+        settings.controller = settings.controller or request.controller
+        settings.function = settings.function or request.function
+        self.automenu()
+
         zero = request.args(0) or 'index'
         if zero and zero.isdigit():
             return self.media(int(zero))
@@ -5130,7 +5547,7 @@ class Wiki(object):
         elif zero == '_cloud':
             return self.cloud()
         elif zero == '_preview':
-            return self.preview(self.get_render())
+            return self.preview(self.get_renderer())
 
     def first_paragraph(self, page):
         if not self.can_read(page):
@@ -5144,24 +5561,25 @@ class Wiki(object):
     def fix_hostname(self, body):
         return (body or '').replace('://HOSTNAME', '://%s' % self.host)
 
-    def read(self, slug):
+    def read(self, slug, force_render=False):
         if slug in '_cloud':
             return self.cloud()
         elif slug in '_search':
             return self.search()
         page = self.auth.db.wiki_page(slug=slug)
-        if not page:
-            redirect(URL(args=('_create', slug)))
-        if not self.can_read(page):
+        if page and (not self.can_read(page)):
             return self.not_authorized(page)
         if current.request.extension == 'html':
             if not page:
-                url = URL(args=('_edit', slug))
+                url = URL(args=('_create', slug))
                 return dict(content=A('Create page "%s"' % slug, _href=url, _class="btn"))
             else:
+                html = page.html if not force_render else self.get_renderer()(page)
+                content = XML(self.fix_hostname(html))
                 return dict(title=page.title,
                             slug=page.slug,
-                            content=XML(self.fix_hostname(page.html)),
+                            page=page,
+                            content=content,
                             tags=page.tags,
                             created_on=page.created_on,
                             modified_on=page.modified_on)
@@ -5173,21 +5591,11 @@ class Wiki(object):
             else:
                 return dict(title=page.title,
                             slug=page.slug,
+                            page=page,
                             content=page.body,
                             tags=page.tags,
                             created_on=page.created_on,
                             modified_on=page.modified_on)
-
-    def check_editor(self, role='wiki_editor', act=False):
-        if not self.auth.user:
-            if not act:
-                return False
-            redirect(self.auth.settings.login_url)
-        elif not self.auth.has_membership(role):
-            if not act:
-                return False
-            raise HTTP(401, "Not Authorized")
-        return True
 
     def edit(self,slug,from_template=0):
         auth = self.auth
@@ -5223,31 +5631,37 @@ class Wiki(object):
             current.session.flash = 'page created'
             redirect(URL(args=slug))
         script = """
-        $(function() {
+        jQuery(function() {
             if (!jQuery('#wiki_page_body').length) return;
             var pagecontent = jQuery('#wiki_page_body');
             pagecontent.css('font-family',
                             'Monaco,Menlo,Consolas,"Courier New",monospace');
             var prevbutton = jQuery('<button class="btn nopreview">Preview</button>');
-            var mediabutton = jQuery('<button class="btn nopreview">Media</button>');
             var preview = jQuery('<div id="preview"></div>').hide();
             var previewmedia = jQuery('<div id="previewmedia"></div>');
             var form = pagecontent.closest('form');
             preview.insertBefore(form);
             prevbutton.insertBefore(form);
-            mediabutton.insertBefore(form);
-            previewmedia.insertBefore(form);
-            mediabutton.toggle(function() {
-                web2py_component('%(urlmedia)s', 'previewmedia');
-            }, function() {
-                previewmedia.empty();
-            });
+            if(%(link_media)s) {
+              var mediabutton = jQuery('<button class="btn nopreview">Media</button>');
+              mediabutton.insertBefore(form);
+              previewmedia.insertBefore(form);
+              mediabutton.toggle(function() {
+                  web2py_component('%(urlmedia)s', 'previewmedia');
+              }, function() {
+                  previewmedia.empty();
+              });
+            }
             prevbutton.click(function(e) {
                 e.preventDefault();
                 if (prevbutton.hasClass('nopreview')) {
                     prevbutton.addClass('preview').removeClass(
                         'nopreview').html('Edit Source');
-                    web2py_ajax_page('post', '%(url)s', {body : jQuery('#wiki_page_body').val()}, 'preview');
+                    try{var wiki_render = jQuery('#wiki_page_render').val()}
+                    catch(e){var wiki_render = null;}
+                    web2py_ajax_page('post', \
+                        '%(url)s', {body: jQuery('#wiki_page_body').val(), \
+                                    render: wiki_render}, 'preview');
                     form.fadeOut('fast', function() {preview.fadeIn()});
                 } else {
                     prevbutton.addClass(
@@ -5256,7 +5670,7 @@ class Wiki(object):
                 }
             })
         })
-        """ % dict(url=URL(args=('_preview', slug)),
+        """ % dict(url=URL(args=('_preview', slug)),link_media=('true' if page else 'false'),
                    urlmedia=URL(extension='load',
                                 args=('_editmedia',slug),
                                 vars=dict(embedded=1)))
@@ -5304,7 +5718,7 @@ class Wiki(object):
         slugs=db(db.wiki_page.id>0).select(db.wiki_page.id,db.wiki_page.slug)
         options=[OPTION(row.slug,_value=row.id) for row in slugs]
         options.insert(0, OPTION('',_value=''))
-        fields = [Field("slug", default=current.request.args(1) or 
+        fields = [Field("slug", default=current.request.args(1) or
                         self.settings.force_prefix,
                         requires=(IS_SLUG(), IS_NOT_IN_DB(db,db.wiki_page.slug))),]
         if self.settings.templates:
@@ -5316,7 +5730,7 @@ class Wiki(object):
                                             '%(slug)s')),
                       comment=current.T(
                         "Choose Template or empty for new Page")))
-        form = SQLFORM.factory(*fields, **dict(_class="well span6"))
+        form = SQLFORM.factory(*fields, **dict(_class="well"))
         form.element("[type=submit]").attributes["_value"] = \
             current.T("Create Page from Slug")
 
@@ -5337,7 +5751,7 @@ class Wiki(object):
         content = SQLFORM.grid(
             wiki_table,
             fields = [wiki_table.slug,
-                      wiki_table.title, wiki_table.tags, 
+                      wiki_table.title, wiki_table.tags,
                       wiki_table.can_read, wiki_table.can_edit],
             links=[
                 lambda row:
@@ -5352,7 +5766,7 @@ class Wiki(object):
         return dict(content=content)
 
     def media(self, id):
-        request, db = current.request, self.auth.db
+        request, response, db = current.request, current.response, self.auth.db
         media = db.wiki_media(id)
         if media:
             if self.settings.manage_permissions:
@@ -5360,7 +5774,15 @@ class Wiki(object):
                 if not self.can_read(page):
                     return self.not_authorized(page)
             request.args = [media.filename]
-            return current.response.download(request, db)
+            m = response.download(request, db)
+            current.session.forget() # get rid of the cookie
+            response.headers['Last-Modified'] = \
+                request.utcnow.strftime("%a, %d %b %Y %H:%M:%S GMT")
+            if 'Content-Disposition' in response.headers:
+                del response.headers['Content-Disposition']
+            response.headers['Pragma'] = 'cache'
+            response.headers['Cache-Control'] = 'private'
+            return m
         else:
             raise HTTP(404)
 
@@ -5381,8 +5803,8 @@ class Wiki(object):
                     items = link[2:].split('/')
                     if len(items) > 3:
                         title_page = items[3]
-                        link = URL(a=items[0] or None, c=items[1] or None,
-                                   f=items[2] or None, args=items[3:])
+                        link = URL(a=items[0] or None, c=items[1] or controller,
+                                   f=items[2] or function, args=items[3:])
                 parent = tree.get(base[1:], tree[''])
                 subtree = []
                 tree[base] = subtree
@@ -5513,8 +5935,43 @@ class Wiki(object):
 
     def preview(self, render):
         request = current.request
+        # FIXME: This is an ugly hack to ensure a default render
+        # engine if not specified (with multiple render engines)
+        if not "render" in request.post_vars:
+            request.post_vars.render = None
         return render(request.post_vars)
 
+class Config(object):
+    def __init__(
+        self,
+        filename,
+        section,
+        default_values={}
+    ):
+        self.config = ConfigParser.ConfigParser(default_values)
+        self.config.read(filename)
+        if not self.config.has_section(section):
+            self.config.add_section(section)
+        self.section  = section
+        self.filename = filename
+
+    def read(self):
+        if not( isinstance(current.session['settings_%s' % self.section], dict) ):
+            settings = dict(self.config.items(self.section))
+        else:
+            settings = current.session['settings_%s' % self.section]
+        return settings
+
+    def save(self, options):
+        for option, value in options:
+            self.config.set(self.section, option, value)
+        try:
+            self.config.write(open(self.filename, 'w'))
+            result = True
+        except:
+            current.session['settings_%s' % self.section] = dict(self.config.items(self.section))
+            result = False
+        return result
 
 if __name__ == '__main__':
     import doctest

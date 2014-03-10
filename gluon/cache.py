@@ -2,12 +2,12 @@
 # -*- coding: utf-8 -*-
 
 """
-This file is part of the web2py Web Framework
-Copyrighted by Massimo Di Pierro <mdipierro@cs.depaul.edu>
-License: LGPLv3 (http://www.gnu.org/licenses/lgpl.html)
+| This file is part of the web2py Web Framework
+| Copyrighted by Massimo Di Pierro <mdipierro@cs.depaul.edu>
+| License: LGPLv3 (http://www.gnu.org/licenses/lgpl.html)
 
 Basic caching classes and methods
-=================================
+---------------------------------
 
 - Cache - The generic caching object interfacing with the others
 - CacheInRam - providing caching in ram
@@ -19,7 +19,6 @@ When web2py is running on Google App Engine,
 caching will be provided by the GAE memcache
 (see gluon.contrib.gae_memcache)
 """
-import traceback
 import time
 import portalocker
 import shelve
@@ -30,7 +29,7 @@ import re
 import hashlib
 import datetime
 try:
-    import settings
+    from gluon import settings
     have_settings = True
 except ImportError:
     have_settings = False
@@ -43,57 +42,56 @@ __all__ = ['Cache', 'lazy_cache']
 DEFAULT_TIME_EXPIRE = 300
 
 
+
 class CacheAbstract(object):
     """
     Abstract class for cache implementations.
-    Main function is now to provide referenced api documentation.
+    Main function just provides referenced api documentation.
 
     Use CacheInRam or CacheOnDisk instead which are derived from this class.
 
-    Attentions, Michele says:
-
-    There are signatures inside gdbm files that are used directly
-    by the python gdbm adapter that often are lagging behind in the
-    detection code in python part.
-    On every occasion that a gdbm store is probed by the python adapter,
-    the probe fails, because gdbm file version is newer.
-    Using gdbm directly from C would work, because there is backward
-    compatibility, but not from python!
-    The .shelve file is discarded and a new one created (with new
-    signature) and it works until it is probed again...
-    The possible consequences are memory leaks and broken sessions.
+    Note:
+        Michele says: there are signatures inside gdbm files that are used 
+        directly by the python gdbm adapter that often are lagging behind in the
+        detection code in python part.
+        On every occasion that a gdbm store is probed by the python adapter,
+        the probe fails, because gdbm file version is newer.
+        Using gdbm directly from C would work, because there is backward
+        compatibility, but not from python!
+        The .shelve file is discarded and a new one created (with new
+        signature) and it works until it is probed again...
+        The possible consequences are memory leaks and broken sessions.
     """
 
     cache_stats_name = 'web2py_cache_statistics'
 
     def __init__(self, request=None):
-        """
-        Paremeters
-        ----------
-        request:
-            the global request object
+        """Initializes the object
+
+        Args:
+            request: the global request object
         """
         raise NotImplementedError
 
     def __call__(self, key, f,
                  time_expire=DEFAULT_TIME_EXPIRE):
         """
-        Tries retrieve the value corresponding to `key` from the cache of the
-        object exists and if it did not expire, else it called the function `f`
-        and stores the output in the cache corresponding to `key`. In the case
-        the output of the function is returned.
+        Tries to retrieve the value corresponding to `key` from the cache if the
+        object exists and if it did not expire, else it calls the function `f`
+        and stores the output in the cache corresponding to `key`. It always
+        returns the function that is returned.
 
-        :param key: the key of the object to be store or retrieved
-        :param f: the function, whose output is to be cached
-        :param time_expire: expiration of the cache in microseconds
+        Args:
+            key(str): the key of the object to be stored or retrieved
+            f(function): the function whose output is to be cached.
 
-        - `time_expire` is used to compare the current time with the time when
-            the requested object was last saved in cache. It does not affect
-            future requests.
-        - Setting `time_expire` to 0 or negative value forces the cache to
-            refresh.
+                If `f` is `None` the cache is cleared.
+            time_expire(int): expiration of the cache in seconds.
 
-        If the function `f` is `None` the cache is cleared.
+                It's used to compare the current time with the time
+                when the requested object was last saved in cache. It does not
+                affect future requests. Setting `time_expire` to 0 or negative
+                value forces the cache to refresh.
         """
         raise NotImplementedError
 
@@ -102,11 +100,9 @@ class CacheAbstract(object):
         Clears the cache of all keys that match the provided regular expression.
         If no regular expression is provided, it clears all entries in cache.
 
-        Parameters
-        ----------
-        regex:
-            if provided, only keys matching the regex will be cleared.
-            Otherwise all keys are cleared.
+        Args:
+            regex: if provided, only keys matching the regex will be cleared,
+                otherwise all keys are cleared.
         """
 
         raise NotImplementedError
@@ -115,12 +111,9 @@ class CacheAbstract(object):
         """
         Increments the cached value for the given key by the amount in value
 
-        Parameters
-        ----------
-        key:
-            key for the cached object to be incremeneted
-        value:
-            amount of the increment (defaults to 1, can be negative)
+        Args:
+            key(str): key for the cached object to be incremeneted
+            value(int): amount of the increment (defaults to 1, can be negative)
         """
         raise NotImplementedError
 
@@ -188,12 +181,17 @@ class CacheInRam(CacheAbstract):
                  time_expire=DEFAULT_TIME_EXPIRE,
                  destroyer=None):
         """
-        Attention! cache.ram does not copy the cached object. It just stores a reference to it.
-        Turns out the deepcopying the object has some problems:
-        1) would break backward compatibility
-        2) would be limiting because people may want to cache live objects
-        3) would work unless we deepcopy no storage and retrival which would make things slow.
-        Anyway. You can deepcopy explicitly in the function generating the value to be cached.
+        Attention! cache.ram does not copy the cached object. 
+        It just stores a reference to it. Turns out the deepcopying the object 
+        has some problems:
+
+        - would break backward compatibility
+        - would be limiting because people may want to cache live objects
+        - would work unless we deepcopy no storage and retrival which would make
+          things slow.
+
+        Anyway. You can deepcopy explicitly in the function generating the value
+        to be cached.
         """
         self.initialize()
 
@@ -255,7 +253,10 @@ class CacheOnDisk(CacheAbstract):
         try:
             if self.storage:
                 self.storage.close()
+        except ValueError:
+            pass
         finally:
+            self.storage = None
             if self.locker and self.locked:
                 portalocker.unlock(self.locker)
                 self.locker.close()
@@ -278,10 +279,11 @@ class CacheOnDisk(CacheAbstract):
                 storage = shelve.open(self.shelve_name)
             except:
                 logger.error('corrupted cache file %s, will try rebuild it'
-                             % (self.shelve_name))
+                             % self.shelve_name)
                 storage = None
-            if not storage and os.path.exists(self.shelve_name):
-                os.unlink(self.shelve_name)
+            if storage is None:
+                if os.path.exists(self.shelve_name):
+                    os.unlink(self.shelve_name)
                 storage = shelve.open(self.shelve_name)
             if not CacheAbstract.cache_stats_name in storage.keys():
                 storage[CacheAbstract.cache_stats_name] = {
@@ -416,14 +418,12 @@ class Cache(object):
 
     def __init__(self, request):
         """
-        Parameters
-        ----------
-        request:
-            the global request object
+        Args: 
+            request: the global request object
         """
         # GAE will have a special caching
         if have_settings and settings.global_settings.web2py_runtime_gae:
-            from contrib.gae_memcache import MemcacheClient
+            from gluon.contrib.gae_memcache import MemcacheClient
             self.ram = self.disk = MemcacheClient(request)
         else:
             # Otherwise use ram (and try also disk)
@@ -437,84 +437,121 @@ class Cache(object):
                 # been accounted for
                 logger.warning('no cache.disk (AttributeError)')
 
-    def client(self, time_expire=DEFAULT_TIME_EXPIRE, cache_model=None,
+    def action(self, time_expire=DEFAULT_TIME_EXPIRE, cache_model=None,
              prefix=None, session=False, vars=True, lang=True,
              user_agent=False, public=True, valid_statuses=None,
              quick=None):
-        """
-        Experimental!
+        """Better fit for caching an action
+
+        Warning: 
+            Experimental!
+
         Currently only HTTP 1.1 compliant
         reference : http://code.google.com/p/doctype-mirror/wiki/ArticleHttpCaching
-        time_expire: same as @cache
-        cache_model: same as @cache
-        prefix: add a prefix to the calculated key
-        session: adds response.session_id to the key
-        vars: adds request.env.query_string
-        lang: adds T.accepted_language
-        user_agent: if True, adds is_mobile and is_tablet to the key.
-            Pass a dict to use all the needed values (uses str(.items())) (e.g. user_agent=request.user_agent())
-            used only if session is not True
-        public: if False forces the Cache-Control to be 'private'
-        valid_statuses: by default only status codes starting with 1,2,3 will be cached.
-            pass an explicit list of statuses on which turn the cache on
-        quick: Session,Vars,Lang,User-agent,Public:
-            fast overrides with initial strings, e.g. 'SVLP' or 'VLP', or 'VLP'
+
+        Args:
+            time_expire(int): same as @cache
+            cache_model(str): same as @cache
+            prefix(str): add a prefix to the calculated key
+            session(bool): adds response.session_id to the key
+            vars(bool): adds request.env.query_string
+            lang(bool): adds T.accepted_language
+            user_agent(bool or dict): if True, adds is_mobile and is_tablet to the key.
+                Pass a dict to use all the needed values (uses str(.items())) 
+                (e.g. user_agent=request.user_agent()). Used only if session is 
+                not True
+            public(bool): if False forces the Cache-Control to be 'private'
+            valid_statuses: by default only status codes starting with 1,2,3 will be cached.
+                pass an explicit list of statuses on which turn the cache on
+            quick: Session,Vars,Lang,User-agent,Public:
+                fast overrides with initials, e.g. 'SVLP' or 'VLP', or 'VLP'
         """
         from gluon import current
+        from gluon.http import HTTP
         def wrap(func):
             def wrapped_f():
-                if current.request.env.request_method == 'GET':
-                    if time_expire:
-                        cache_control = 'max-age=%(time_expire)s, s-maxage=%(time_expire)s' % dict(time_expire=time_expire)
-                        if quick:
-                            session_ = True if 'S' in quick else False
-                            vars_ = True if 'V' in quick else False
-                            lang_ = True if 'L' in quick else False
-                            user_agent_ = True if 'U' in quick else False
-                            public_ = True if 'P' in quick else False
-                        else:
-                            session_, vars_, lang_, user_agent_, public_ = session, vars, lang, user_agent, public
-                        if not session_ and public_:
-                            cache_control += ', public'
-                            expires = (current.request.utcnow + datetime.timedelta(seconds=time_expire)).strftime('%a, %d %b %Y %H:%M:%S GMT')
-                            vary = None
-                        else:
-                            cache_control += ', private'
-                            expires = 'Fri, 01 Jan 1990 00:00:00 GMT'
-                    if cache_model:
-                        cache_key = [current.request.env.path_info, current.response.view]
-                        if session_:
-                            cache_key.append(current.response.session_id)
-                        elif user_agent_:
-                            if user_agent_ is True:
-                                cache_key.append("%(is_mobile)s_%(is_tablet)s" % current.request.user_agent())
-                            else:
-                                cache_key.append(str(user_agent_.items()))
-                        if vars_:
-                            cache_key.append(current.request.env.query_string)
-                        if lang_:
-                            cache_key.append(current.T.accepted_language)
-                        cache_key = hashlib.md5('__'.join(cache_key)).hexdigest()
-                        if prefix:
-                            cache_key = prefix + cache_key
-                        rtn = cache_model(cache_key, lambda : func(), time_expire=time_expire)
+                if current.request.env.request_method != 'GET':
+                    return func()
+                if time_expire:
+                    cache_control = 'max-age=%(time_expire)s, s-maxage=%(time_expire)s' % dict(time_expire=time_expire)
+                    if quick:
+                        session_ = True if 'S' in quick else False
+                        vars_ = True if 'V' in quick else False
+                        lang_ = True if 'L' in quick else False
+                        user_agent_ = True if 'U' in quick else False
+                        public_ = True if 'P' in quick else False
                     else:
+                        session_, vars_, lang_, user_agent_, public_ = session, vars, lang, user_agent, public
+                    if not session_ and public_:
+                        cache_control += ', public'
+                        expires = (current.request.utcnow + datetime.timedelta(seconds=time_expire)).strftime('%a, %d %b %Y %H:%M:%S GMT')
+                    else:
+                        cache_control += ', private'
+                        expires = 'Fri, 01 Jan 1990 00:00:00 GMT'
+                if cache_model:
+                    #figure out the correct cache key
+                    cache_key = [current.request.env.path_info, current.response.view]
+                    if session_:
+                        cache_key.append(current.response.session_id)
+                    elif user_agent_:
+                        if user_agent_ is True:
+                            cache_key.append("%(is_mobile)s_%(is_tablet)s" % current.request.user_agent())
+                        else:
+                            cache_key.append(str(user_agent_.items()))
+                    if vars_:
+                        cache_key.append(current.request.env.query_string)
+                    if lang_:
+                        cache_key.append(current.T.accepted_language)
+                    cache_key = hashlib.md5('__'.join(cache_key)).hexdigest()
+                    if prefix:
+                        cache_key = prefix + cache_key
+                    try:
+                        #action returns something
+                        rtn = cache_model(cache_key, lambda : func(), time_expire=time_expire)
+                        http, status = None, current.response.status
+                    except HTTP, e:
+                        #action raises HTTP (can still be valid)
+                        rtn = cache_model(cache_key, lambda : e.body, time_expire=time_expire)
+                        http, status = HTTP(e.status, rtn, **e.headers), e.status
+                    else:
+                        #action raised a generic exception
+                        http = None
+                else:
+                    #no server-cache side involved
+                    try:
+                        #action returns something
                         rtn = func()
-                    send_headers = False
-                    if isinstance(valid_statuses, list):
-                        if current.response.status in valid_statuses:
-                            send_headers = True
-                    elif valid_statuses is None:
-                        if str(current.response.status)[0] in '123':
-                            send_headers = True
+                        http, status = None, current.response.status
+                    except HTTP, e:
+                        #action raises HTTP (can still be valid)
+                        status = e.status
+                        http = HTTP(e.status, e.body, **e.headers)
+                    else:
+                        #action raised a generic exception
+                        http = None
+                send_headers = False
+                if http and isinstance(valid_statuses, list):
+                    if status in valid_statuses:
+                        send_headers = True
+                elif valid_statuses is None:
+                    if str(status)[0] in '123':
+                        send_headers = True
+                if send_headers:
+                    headers = {
+                        'Pragma' : None,
+                        'Expires' : expires,
+                        'Cache-Control' : cache_control
+                        }
+                    current.response.headers.update(headers)
+                if cache_model and not send_headers:
+                    #we cached already the value, but the status is not valid
+                    #so we need to delete the cached value
+                    cache_model(cache_key, None)
+                if http:
                     if send_headers:
-                        current.response.headers['Pragma'] = None
-                        current.response.headers['Expires'] = expires
-                        current.response.headers['Cache-Control'] = cache_control
-                    if cache_model and not send_headers:
-                        cache_model(cache_key, None)
-                    return rtn
-                return func()
+                        http.headers.update(current.response.headers)
+                    raise http
+                return rtn
             wrapped_f.__name__ = func.__name__
             wrapped_f.__doc__ = func.__doc__
             return wrapped_f
@@ -527,33 +564,32 @@ class Cache(object):
         """
         Decorator function that can be used to cache any function/method.
 
-        Example::
+        Args:
+            key(str) : the key of the object to be store or retrieved
+            time_expire(int) : expiration of the cache in seconds
+                `time_expire` is used to compare the current time with the time 
+                when the requested object was last saved in cache. 
+                It does not affect future requests.
+                Setting `time_expire` to 0 or negative value forces the cache to
+                refresh.
+            cache_model(str): can be "ram", "disk" or other (like "memcache").
+                Defaults to "ram"
 
-            @cache('key', 5000, cache.ram)
-            def f():
-                return time.ctime()
-
-        When the function f is called, web2py tries to retrieve
-        the value corresponding to `key` from the cache of the
+        When the function `f` is called, web2py tries to retrieve
+        the value corresponding to `key` from the cache if the
         object exists and if it did not expire, else it calles the function `f`
         and stores the output in the cache corresponding to `key`. In the case
         the output of the function is returned.
 
-        :param key: the key of the object to be store or retrieved
-        :param time_expire: expiration of the cache in microseconds
-        :param cache_model: "ram", "disk", or other
-            (like "memcache" if defined). It defaults to "ram".
+        Example: ::
 
-        Notes
-        -----
-        `time_expire` is used to compare the curret time with the time when the
-        requested object was last saved in cache. It does not affect future
-        requests.
-        Setting `time_expire` to 0 or negative value forces the cache to
-        refresh.
+          @cache('key', 5000, cache.ram)
+          def f():
+              return time.ctime()
 
-        If the function `f` is an action, we suggest using
-        @cache.client instead
+        Note:
+            If the function `f` is an action, we suggest using
+            @cache.action instead
         """
 
         def tmp(func, cache=self, cache_model=cache_model):
@@ -572,11 +608,13 @@ class Cache(object):
 
 def lazy_cache(key=None, time_expire=None, cache_model='ram'):
     """
-    can be used to cache any function including in modules,
+    Can be used to cache any function including ones in modules,
     as long as the cached function is only called within a web2py request
-    if a key is not provided, one is generated from the function name
-    the time_expire defaults to None (no cache expiration)
-    if cache_model is "ram" then the model is current.cache.ram, etc.
+
+    If a key is not provided, one is generated from the function name
+    `time_expire` defaults to None (no cache expiration)
+
+    If cache_model is "ram" then the model is current.cache.ram, etc.
     """
     def decorator(f, key=key, time_expire=time_expire, cache_model=cache_model):
         key = key or repr(f)

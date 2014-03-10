@@ -2,7 +2,7 @@
 # this file is released under public domain and you can use without limitations
 
 #########################################################################
-## This is a samples controller
+## This is a sample controller
 ## - index is the default action of any application
 ## - user is required for authentication and authorization
 ## - download is for downloading files uploaded in the db (does streaming)
@@ -15,7 +15,7 @@ def index():
     example action using the internationalization operator T and flash
     rendered by views/default/index.html or views/generic.html
 
-    if you need a simple wiki simple replace the two lines below with:
+    if you need a simple wiki simply replace the two lines below with:
     return auth.wiki()
     """
     response.flash = T("Welcome to web2py!")
@@ -31,6 +31,7 @@ def user():
     http://..../[app]/default/user/profile
     http://..../[app]/default/user/retrieve_password
     http://..../[app]/default/user/change_password
+    http://..../[app]/default/user/manage_users (requires membership in
     use @auth.requires_login()
         @auth.requires_membership('group name')
         @auth.requires_permission('read','table name',record_id)
@@ -38,7 +39,7 @@ def user():
     """
     return dict(form=auth())
 
-
+@cache.action()
 def download():
     """
     allows downloading of uploaded files

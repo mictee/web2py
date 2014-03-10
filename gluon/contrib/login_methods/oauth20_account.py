@@ -147,7 +147,7 @@ server for requests.  It can be used for the optional"scope" parameters for Face
             # reuse token until expiration
             if expires == 0 or expires > time.time():
                         return current.session.token['access_token']
-            
+
         code = current.request.vars.code
 
         if code:
@@ -172,9 +172,9 @@ server for requests.  It can be used for the optional"scope" parameters for Face
             if open_url:
                 try:
                     data = open_url.read()
-                    resp_type = open_url.info().get('Content-Type')
+                    resp_type = open_url.info().gettype()
                     # try json style first
-                    if not resp_type or resp_type == 'application/json':
+                    if not resp_type or resp_type[:16] == 'application/json':
                         try:
                             tokendata = json.loads(data)
                             current.session.token = tokendata
@@ -285,7 +285,7 @@ server for requests.  It can be used for the optional"scope" parameters for Face
             if self.args:
                 data.update(self.args)
             auth_request_url = self.auth_url + "?" + urlencode(data)
-            raise HTTP(307,
+            raise HTTP(302,
                        "You are not authenticated: you are being redirected to the <a href='" + auth_request_url + "'> authentication server</a>",
                        Location=auth_request_url)
         return

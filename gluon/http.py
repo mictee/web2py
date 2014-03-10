@@ -27,6 +27,7 @@ defined_status = {
     307: 'TEMPORARY REDIRECT',
     400: 'BAD REQUEST',
     401: 'UNAUTHORIZED',
+    402: 'PAYMENT REQUIRED',
     403: 'FORBIDDEN',
     404: 'NOT FOUND',
     405: 'METHOD NOT ALLOWED',
@@ -43,26 +44,20 @@ defined_status = {
     416: 'REQUESTED RANGE NOT SATISFIABLE',
     417: 'EXPECTATION FAILED',
     422: 'UNPROCESSABLE ENTITY',
+    429: 'TOO MANY REQUESTS',
+    451: 'UNAVAILABLE FOR LEGAL REASONS', # http://www.451unavailable.org/
     500: 'INTERNAL SERVER ERROR',
     501: 'NOT IMPLEMENTED',
     502: 'BAD GATEWAY',
     503: 'SERVICE UNAVAILABLE',
     504: 'GATEWAY TIMEOUT',
     505: 'HTTP VERSION NOT SUPPORTED',
+    509: 'BANDWIDTH LIMIT EXCEEDED',
 }
 
-# If web2py is executed with python2.4 we need
-# to use Exception instead of BaseException
+regex_status = re.compile('^\d{3} [0-9A-Z ]+$')
 
-try:
-    BaseException
-except NameError:
-    BaseException = Exception
-
-regex_status = re.compile('^\d{3} \w+$')
-
-
-class HTTP(BaseException):
+class HTTP(Exception):
 
     def __init__(
         self,
@@ -87,6 +82,8 @@ class HTTP(BaseException):
         headers = self.headers
         if status in defined_status:
             status = '%d %s' % (status, defined_status[status])
+        elif isinstance(status, int):
+            status = '%d UNKNOWN ERROR' % status
         else:
             status = str(status)
             if not regex_status.match(status):
@@ -123,14 +120,15 @@ class HTTP(BaseException):
 
         message elements that are not defined are omitted
         """
-        msg = '%(status)d'
+        msg = '%(status)s'
         if self.status in defined_status:
-            msg = '%(status)d %(defined_status)s'
+            msg = '%(status)s %(defined_status)s'
         if 'web2py_error' in self.headers:
             msg += ' [%(web2py_error)s]'
-        return msg % dict(status=self.status,
-                          defined_status=defined_status.get(self.status),
-                          web2py_error=self.headers.get('web2py_error'))
+        return msg % dict(
+            status=self.status,
+            defined_status=defined_status.get(self.status),
+            web2py_error=self.headers.get('web2py_error'))
 
     def __str__(self):
         "stringify me"

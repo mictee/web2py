@@ -5,22 +5,60 @@
 """
 import sys
 import os
-if os.path.isdir('gluon'):
-    sys.path.append(os.path.realpath('gluon'))
+if sys.version_info < (2, 7):
+    import unittest2 as unittest
 else:
-    sys.path.append(os.path.realpath('../'))
-
-import unittest
+    import unittest
 import subprocess
 import time
 import signal
+
+
+def fix_sys_path():
+    """
+    logic to have always the correct sys.path
+     '', web2py/gluon, web2py/site-packages, web2py/ ...
+    """
+
+    def add_path_first(path):
+        sys.path = [path] + [p for p in sys.path if (
+            not p == path and not p == (path + '/'))]
+
+    path = os.path.dirname(os.path.abspath(__file__))
+
+    if not os.path.isfile(os.path.join(path,'web2py.py')):
+        i = 0
+        while i<10:
+            i += 1
+            if os.path.exists(os.path.join(path,'web2py.py')):
+                break
+            path = os.path.abspath(os.path.join(path, '..'))
+
+    paths = [path,
+             os.path.abspath(os.path.join(path, 'site-packages')),
+             os.path.abspath(os.path.join(path, 'gluon')),
+             '']
+    [add_path_first(path) for path in paths]
+
+fix_sys_path()
+
 from contrib.webclient import WebClient
+from urllib2 import HTTPError
 
 webserverprocess = None
 
 def startwebserver():
     global webserverprocess
-    webserverprocess = subprocess.Popen([sys.executable, 'web2py.py', '-a',  'testpass'])
+    path = path = os.path.dirname(os.path.abspath(__file__))
+    if not os.path.isfile(os.path.join(path,'web2py.py')):
+        i = 0
+        while i<10:
+            i += 1
+            if os.path.exists(os.path.join(path,'web2py.py')):
+                break
+            path = os.path.abspath(os.path.join(path, '..'))
+    web2py_exec = os.path.join(path, 'web2py.py')
+    webserverprocess = subprocess.Popen([sys.executable, web2py_exec, '-a',  'testpass'])
     print 'Sleeping before web2py starts...'
     for a in range(1,11):
         time.sleep(1)
@@ -29,7 +67,7 @@ def startwebserver():
 
 def terminate_process(pid):
     #Taken from http://stackoverflow.com/questions/1064335/in-python-2-5-how-do-i-kill-a-subprocess
-    # all this shit is because we are stuck with Python 2.5 and \
+    # all this **blah** is because we are stuck with Python 2.5 and \
     #we cannot use Popen.terminate()
     if sys.platform.startswith('win'):
         import ctypes
@@ -60,7 +98,7 @@ class LiveTest(unittest.TestCase):
         stopwebserver()
 
 
-
+@unittest.skipIf("datastore" in os.getenv("DB", ""), "TODO: setup web test for app engine")
 class TestWeb(LiveTest):
     def testRegisterAndLogin(self):
         client = WebClient('http://127.0.0.1:8000/welcome/default/')
@@ -84,10 +122,12 @@ class TestWeb(LiveTest):
                     password='test',
                     _formname='login')
         client.post('user/login', data=data)
+        self.assertTrue('Welcome Homer' in client.text)
 
         # check registration and login were successful
         client.get('index')
 
+        # COMMENTED BECAUSE FAILS BUT WHY?
         self.assertTrue('Welcome Homer' in client.text)
 
         client = WebClient('http://127.0.0.1:8000/admin/default/')
@@ -106,6 +146,37 @@ class TestWeb(LiveTest):
         assert('expires' in s.headers)
         assert(s.headers['cache-control'].startswith('max-age'))
 
+    def testSoap(self):
+        # test soap server implementation
+        from gluon.contrib.pysimplesoap.client import SoapClient, SoapFault
+        url = 'http://127.0.0.1:8000/examples/soap_examples/call/soap?WSDL'
+        client = SoapClient(wsdl=url)
+        ret = client.SubIntegers(a=3, b=2)
+        # check that the value returned is ok
+        assert('SubResult' in ret)
+        assert(ret['SubResult'] == 1)
+
+        try:
+            ret = client.Division(a=3, b=0)
+        except SoapFault, sf:
+            # verify the exception value is ok
+            # assert(sf.faultstring == "float division by zero") # true only in 2.7
+            assert(sf.faultcode == "Server.ZeroDivisionError")
+
+        # store sent and received xml for low level test
+        xml_request = client.xml_request
+        xml_response = client.xml_response
+
+        # do a low level raw soap request (using
+        s = WebClient('http://127.0.0.1:8000/')
+        try:
+            s.post('examples/soap_examples/call/soap', data=xml_request, method="POST")
+        except HTTPError, e:
+            assert(e.msg=='INTERNAL SERVER ERROR')
+        # check internal server error returned (issue 153)
+        assert(s.status == 500)
+        assert(s.text == xml_response)
+        
 
 if __name__ == '__main__':
     unittest.main()

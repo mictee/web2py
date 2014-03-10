@@ -267,6 +267,8 @@ def ldap_auth(server='ldap', port=None,
 
             if ldap_mode == 'cn':
                 # OpenLDAP (CN)
+                if ldap_binddn and ldap_bindpw:
+                    con.simple_bind_s(ldap_binddn, ldap_bindpw)
                 dn = "cn=" + username + "," + ldap_basedn
                 con.simple_bind_s(dn, password)
                 if manage_user:
@@ -278,7 +280,12 @@ def ldap_auth(server='ldap', port=None,
 
             if ldap_mode == 'uid':
                 # OpenLDAP (UID)
-                dn = "uid=" + username + "," + ldap_basedn
+                if ldap_binddn and ldap_bindpw:
+                    con.simple_bind_s(ldap_binddn, ldap_bindpw)
+                    dn = "uid=" + username + "," + ldap_basedn
+                    dn = con.search_s(ldap_basedn, ldap.SCOPE_SUBTREE, "(uid=%s)"%username, [''])[0][0]
+                else:
+                    dn = "uid=" + username + "," + ldap_basedn
                 con.simple_bind_s(dn, password)
                 if manage_user:
                     result = con.search_s(dn, ldap.SCOPE_BASE,
@@ -640,7 +647,10 @@ def ldap_auth(server='ldap', port=None,
             else:
                 # bind as anonymous
                 con.simple_bind_s('', '')
-
+                
+        # if username is None, return empty list
+        if username is None:
+            return list()
         # search for groups where user is in
         filter = '(&(%s=%s)(%s))' % (ldap.filter.escape_filter_chars(
                                                             group_member_attrib
@@ -653,7 +663,8 @@ def ldap_auth(server='ldap', port=None,
         ldap_groups_of_the_user = list()
         for group_row in group_search_result:
             group = group_row[1]
-            ldap_groups_of_the_user.extend(group[group_name_attrib])
+            if type(group) == dict and group.has_key(group_name_attrib):
+                ldap_groups_of_the_user.extend(group[group_name_attrib])
 
         con.unbind()
         logger.debug('User groups: %s' % ldap_groups_of_the_user)
@@ -662,4 +673,3 @@ def ldap_auth(server='ldap', port=None,
     if filterstr[0] == '(' and filterstr[-1] == ')':  # rfc4515 syntax
         filterstr = filterstr[1:-1]  # parens added again where used
     return ldap_auth_aux
-
